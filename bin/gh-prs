@@ -238,8 +238,7 @@ readonly LIST_TRANSFORM="$CHECKS"'
           repo: .[0].repoFull,
           failing: ([.[] | select(.state == "failing")] | length),
           prs: (sort_by(.updatedAt) | reverse)
-        })
-      | sort_by(.prs[0].updatedAt) | reverse)
+        }))
   }
 '
 

@@ -18,9 +18,11 @@ The panel lists every open PR, grouped by repository
 
 - **By status** (the default): within each repository, passing PRs first, then
   running, failing, and those with no checks, drafts after the rest in each,
-  and newest first within that. Repositories with anything passing come first, then
-  by their most recently updated PR.
-- **By date**: newest first, PRs and repositories alike, whatever their checks say.
+  and newest first within that.
+- **By date**: newest first within each repository, whatever their checks say.
+
+Repositories themselves are always in alphabetical order, so each one stays in
+the same place from one refresh to the next.
 
 The choice is saved in `~/.local/state/omarchy-gh-prs/sort`, so it survives a
 restart. Each row has:

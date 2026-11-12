@@ -217,10 +217,11 @@ Panel {
 
   // Repository headings and PR rows in one flat list, so one ListView scrolls the
   // lot and the cursor can step over the headings.
-  // By status: passing first, then running, failing, and no checks, drafts
-  // after the rest within each, newest first within that. Repositories with
-  // anything passing come first, then by their newest PR. By date: newest
-  // first, PRs and repositories alike. The script already sends both by date.
+  // Repositories always come in the same order, alphabetical, so each one
+  // stays where you last saw it. The sort applies within each: by status,
+  // passing first, then running, failing, and no checks, drafts after the
+  // rest within each, newest first within that; by date, newest first. The
+  // script sends PRs by date and repositories alphabetically (group_by).
   function sortGroups(groups) {
     if (sortMode === "date") return groups
     var rank = { passing: 0, running: 1, failing: 2, none: 3 }
@@ -231,13 +232,7 @@ Panel {
           || ((a.draft ? 1 : 0) - (b.draft ? 1 : 0))
           || newest(a, b)
       })
-      var anyPassing = g.prs.some(function(pr) { return pr.state === "passing" })
-      var latest = g.prs.reduce(function(m, pr) { return pr.updatedAt > m ? pr.updatedAt : m }, "")
-      return { repo: g.repo, failing: g.failing, prs: prs, anyPassing: anyPassing, latest: latest }
-    })
-    out.sort(function(a, b) {
-      return ((b.anyPassing ? 1 : 0) - (a.anyPassing ? 1 : 0))
-        || (a.latest < b.latest ? 1 : a.latest > b.latest ? -1 : 0)
+      return { repo: g.repo, failing: g.failing, prs: prs }
     })
     return out
   }

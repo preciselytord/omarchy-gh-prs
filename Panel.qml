@@ -83,6 +83,14 @@ Panel {
 
   property var payload: null
   property var rows: []
+  // The list view's model holds only each row's key; the row itself is
+  // looked up here. Keeping the model and changing it a row at a time (see
+  // syncModel) is what lets the view animate: a new array each time would
+  // rebuild every delegate, with nothing to animate and the scroll reset.
+  property var rowByKey: ({})
+  // The heading of a repository just folded, which falls rather than slides
+  // to its place at the bottom.
+  property string fallingKey: ""
   property bool reachable: true
   property string errorText: ""
   property bool loading: false
@@ -252,15 +260,43 @@ Panel {
   // Once now, and once more after the delegates are laid out, when the
   // content height is known.
   function rebuildRows() {
-    var y = list.contentY
-    rows = flatten(sortGroups(payload ? payload.groups || [] : []))
+    var next = flatten(sortGroups(payload ? payload.groups || [] : []))
+    var byKey = {}
+    for (var i = 0; i < next.length; i++) byKey[next[i].key] = next[i]
+    rowByKey = byKey
+    rows = next
+    syncModel(next.map(function(r) { return r.key }))
     if (cursor >= rows.length) cursor = -1
-    function restore() {
-      list.contentY = Math.max(0, Math.min(y, list.contentHeight - list.height))
-    }
-    restore()
-    Qt.callLater(restore)
   }
+
+  // Turns the model into `keys` with removes, moves and inserts, so the view
+  // animates each. Position by position, the row that belongs there is moved
+  // up, or inserted: at most one step per position. The heading just folded
+  // is the exception: it is moved straight to its place at the bottom first,
+  // so it is the one that falls rather than everything else climbing past it.
+  function syncModel(keys) {
+    var want = {}
+    for (var w = 0; w < keys.length; w++) want[keys[w]] = w
+    for (var r = rowModel.count - 1; r >= 0; r--)
+      if (!want.hasOwnProperty(rowModel.get(r).key)) rowModel.remove(r)
+    if (want.hasOwnProperty(fallingKey)) {
+      for (var f = 0; f < rowModel.count; f++) {
+        if (rowModel.get(f).key !== fallingKey) continue
+        var to = Math.min(want[fallingKey], rowModel.count - 1)
+        if (to > f) rowModel.move(f, to, 1)
+        break
+      }
+    }
+    for (var i = 0; i < keys.length; i++) {
+      if (i < rowModel.count && rowModel.get(i).key === keys[i]) continue
+      var j = -1
+      for (var m = i + 1; m < rowModel.count; m++)
+        if (rowModel.get(m).key === keys[i]) { j = m; break }
+      if (j >= 0) rowModel.move(j, i, 1)
+      else rowModel.insert(i, { key: keys[i] })
+    }
+  }
+
 
   function toggleCollapsed(repo) {
     if (!validRepo(repo)) return
@@ -272,6 +308,8 @@ Panel {
     // the list where it was (see rebuildRows): following the heading to the
     // bottom would lose your place.
     collapsed = next
+    fallingKey = on ? "repo:" + repo : ""
+    fallingReset.restart()
     rebuildRows()
     Util.execArgv([root.script, "collapsed", repo, on ? "on" : "off"])
   }
@@ -297,11 +335,13 @@ Panel {
     for (var i = 0; i < ordered.length; i++) {
       var g = ordered[i]
       var folded = !!collapsed[g.repo]
-      out.push({ kind: "repo", repo: g.repo, count: g.prs.length, failing: g.failing, collapsed: folded })
+      out.push({ kind: "repo", key: "repo:" + g.repo, repo: g.repo, count: g.prs.length,
+                 failing: g.failing, collapsed: folded })
       if (folded) continue
       for (var j = 0; j < g.prs.length; j++) {
         var pr = g.prs[j]
         pr.kind = "pr"
+        pr.key = "pr:" + pr.repoFull + "#" + pr.number
         out.push(pr)
       }
     }
@@ -657,6 +697,14 @@ Panel {
   }
 
   // The saved sort order, read once at load.
+  ListModel { id: rowModel }
+
+  Timer {
+    id: fallingReset
+    interval: 900
+    onTriggered: root.fallingKey = ""
+  }
+
   Process {
     id: collapsedProc
     command: [root.script, "collapsed"]
@@ -940,8 +988,25 @@ Panel {
           width: parent.width
           visible: root.view === "list" && root.rows.length > 0
           clip: true
-          model: root.rows
+          model: rowModel
           spacing: Style.space(1)
+
+          // A folded heading falls to the bottom and bounces; everything
+          // else slides. PRs folded away fade out, new ones fade in.
+          move: Transition {
+            id: moveTransition
+            NumberAnimation {
+              properties: "y"
+              duration: moveTransition.ViewTransition.item
+                && moveTransition.ViewTransition.item.key === root.fallingKey ? 700 : 220
+              easing.type: moveTransition.ViewTransition.item
+                && moveTransition.ViewTransition.item.key === root.fallingKey ? Easing.OutBounce : Easing.OutCubic
+            }
+          }
+          moveDisplaced: Transition { NumberAnimation { properties: "y"; duration: 220; easing.type: Easing.OutCubic } }
+          displaced: Transition { NumberAnimation { properties: "y"; duration: 220; easing.type: Easing.OutCubic } }
+          add: Transition { NumberAnimation { property: "opacity"; from: 0; to: 1; duration: 160 } }
+          remove: Transition { NumberAnimation { property: "opacity"; to: 0; duration: 140 } }
           boundsBehavior: Flickable.StopAtBounds
           flickableDirection: Flickable.VerticalFlick
           interactive: contentHeight > height
@@ -957,8 +1022,9 @@ Panel {
 
           delegate: Item {
             id: row
-            required property var modelData
+            required property string key
             required property int index
+            readonly property var modelData: root.rowByKey[key] || ({ kind: "pr", title: "", label: "", state: "none" })
 
             readonly property bool isHeading: modelData.kind === "repo"
             readonly property bool active: root.cursor === row.index || rowMouse.containsMouse

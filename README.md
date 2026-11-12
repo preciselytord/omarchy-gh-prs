@@ -22,7 +22,11 @@ The panel lists every open PR, grouped by repository
 - **By date**: newest first within each repository, whatever their checks say.
 
 Repositories themselves are always in alphabetical order, so each one stays in
-the same place from one refresh to the next.
+the same place from one refresh to the next. Clicking a repository's heading
+(or Enter on it) folds it down to that heading, which then also says how many
+of its PRs are failing; folded repositories move to the bottom. Which ones are
+folded is kept in `~/.local/state/omarchy-gh-prs/collapsed`, so they stay
+folded after the panel closes or the shell restarts.
 
 The choice is saved in `~/.local/state/omarchy-gh-prs/sort`, so it survives a
 restart. Each row has:
@@ -215,8 +219,8 @@ button; Auto-merge acts later, on its own, once its box is ticked. Every merge
 is pinned to a head commit you were shown or that auto-merge made. It never
 passes `--admin`, so branch protection applies to you as it does on GitHub.
 
-Outside its own folder it writes the sort order to
-`~/.local/state/omarchy-gh-prs/sort`, and a demo-mode flag under
+Outside its own folder it writes the sort order and the folded repositories
+to `~/.local/state/omarchy-gh-prs/`, and a demo-mode flag under
 `~/.cache/omarchy-gh-prs/` when you turn demo mode on.
 
 ## Screenshots

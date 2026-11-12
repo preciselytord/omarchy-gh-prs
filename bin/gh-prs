@@ -10,6 +10,8 @@
 #                                   close it, and delete its branch if asked
 #   copy <url>                      put a PR's URL on the clipboard
 #   sort [status|date]              print, or save, the panel's sort order
+#   collapsed [<owner/repo> on|off] print the collapsed repositories as JSON,
+#                                   or collapse or expand one
 #   automerge arm <owner/repo> <n> <method> <sha>
 #                                   merge it once its checks pass, rebasing it
 #                                   when it falls behind; pinned to <sha>
@@ -53,6 +55,7 @@ readonly CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/omarchy-gh-prs"
 readonly DEMO_FILE="$CACHE_DIR/demo"
 readonly STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-gh-prs"
 readonly SORT_FILE="$STATE_DIR/sort"
+readonly COLLAPSED_FILE="$STATE_DIR/collapsed"
 readonly AM_LIVE_FILE="$STATE_DIR/automerge.json"
 readonly AM_DEMO_FILE="$CACHE_DIR/automerge-demo.json"
 readonly AM_LOCK="$STATE_DIR/automerge.lock"
@@ -860,6 +863,26 @@ focus() {
   ok "focused $pane"
 }
 
+# The repositories collapsed in the panel, one per line, kept here for the
+# same reason as the sort order. Lines that are not a repository are dropped.
+collapsed() {
+  local repo="${1-}" state="${2-}"
+  if [[ -z "$repo" ]]; then
+    { [[ -f "$COLLAPSED_FILE" ]] && grep -E '^[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}$' "$COLLAPSED_FILE" || true; } \
+      | jq -Rnc '[inputs]'
+    return
+  fi
+  valid_repo "$repo" || die "not a repository: $repo"
+  [[ "$state" == on || "$state" == off ]] || die "usage: gh-prs collapsed <owner/repo> on|off"
+  mkdir -p "$STATE_DIR"
+  {
+    [[ -f "$COLLAPSED_FILE" ]] && grep -vxF "$repo" "$COLLAPSED_FILE" || true
+    if [[ "$state" == on ]]; then printf '%s\n' "$repo"; fi
+  } | sort -u >"$COLLAPSED_FILE.tmp"
+  mv "$COLLAPSED_FILE.tmp" "$COLLAPSED_FILE"
+  ok "$repo $state"
+}
+
 demo() {
   mkdir -p "$CACHE_DIR"
   case "${1-}" in
@@ -885,6 +908,7 @@ case "$cmd" in
   close) close_pr "$@" ;;
   copy) copy "$@" ;;
   sort) sort_order "$@" ;;
+  collapsed) collapsed "$@" ;;
   automerge) automerge "$@" ;;
   sessions) sessions "$@" ;;
   session) open_session "$@" ;;

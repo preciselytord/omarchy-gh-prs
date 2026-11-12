@@ -74,6 +74,10 @@ Panel {
   // than in shell.json: other widgets save shell.json from their own copy of
   // it, and a choice written there was seen to be overwritten seconds later.
   property string sortMode: "status"
+  // Repositories folded down to their heading, as { "owner/name": true }.
+  // Kept in the plugin's state file, like the sort order, so a fold stays
+  // folded after the panel closes and the shell restarts.
+  property var collapsed: ({})
 
   // ---------------------------------------------------------------- state
 
@@ -245,16 +249,46 @@ Panel {
 
   function rebuildRows() {
     rows = flatten(sortGroups(payload ? payload.groups || [] : []))
-    if (!isPr(cursor)) cursor = -1
+    if (cursor >= rows.length) cursor = -1
+  }
+
+  function toggleCollapsed(repo) {
+    if (!validRepo(repo)) return
+    var next = Object.assign({}, collapsed)
+    var on = !next[repo]
+    if (on) next[repo] = true
+    else delete next[repo]
+    collapsed = next
+    rebuildRows()
+    // The heading moves (folded ones go last), so the cursor follows it.
+    for (var i = 0; i < rows.length; i++)
+      if (rows[i].kind === "repo" && rows[i].repo === repo) { cursor = i; list.positionViewAtIndex(i, ListView.Contain); break }
+    Util.execArgv([root.script, "collapsed", repo, on ? "on" : "off"])
+  }
+
+  function applyCollapsed(text) {
+    try {
+      var list = JSON.parse(text)
+      var next = {}
+      for (var i = 0; i < list.length; i++) if (validRepo(list[i])) next[list[i]] = true
+      collapsed = next
+      rebuildRows()
+    } catch (e) {}
   }
 
   onSortModeChanged: rebuildRows()
 
+  // Folded repositories go to the bottom, alphabetical among themselves, so
+  // the open ones stay together at the top.
   function flatten(groups) {
     var out = []
-    for (var i = 0; i < groups.length; i++) {
-      var g = groups[i]
-      out.push({ kind: "repo", repo: g.repo, count: g.prs.length, failing: g.failing })
+    var ordered = groups.filter(function(g) { return !collapsed[g.repo] })
+      .concat(groups.filter(function(g) { return !!collapsed[g.repo] }))
+    for (var i = 0; i < ordered.length; i++) {
+      var g = ordered[i]
+      var folded = !!collapsed[g.repo]
+      out.push({ kind: "repo", repo: g.repo, count: g.prs.length, failing: g.failing, collapsed: folded })
+      if (folded) continue
       for (var j = 0; j < g.prs.length; j++) {
         var pr = g.prs[j]
         pr.kind = "pr"
@@ -273,9 +307,9 @@ Panel {
     for (var step = 0; step < rows.length; step++) {
       next += delta
       if (next < 0 || next >= rows.length) return
-      if (isPr(next)) break
+      break
     }
-    if (!isPr(next)) return
+    if (next < 0 || next >= rows.length) return
     cursor = next
     list.positionViewAtIndex(next, ListView.Contain)
   }
@@ -614,6 +648,15 @@ Panel {
 
   // The saved sort order, read once at load.
   Process {
+    id: collapsedProc
+    command: [root.script, "collapsed"]
+    running: true
+    stdout: StdioCollector {
+      onStreamFinished: root.applyCollapsed(text)
+    }
+  }
+
+  Process {
     id: sortProc
     command: [root.script, "sort"]
     running: true
@@ -788,7 +831,10 @@ Panel {
       // PanelKeyCatcher hands `x` to deleteRequested rather than textKey.
       onDeleteRequested: if (root.view === "detail") root.armClose()
       onActivateRequested: {
-        if (root.view === "list" && root.isPr(root.cursor)) root.showDetail(root.rows[root.cursor])
+        if (root.view !== "list" || root.cursor < 0 || root.cursor >= root.rows.length) return
+        var r = root.rows[root.cursor]
+        if (r.kind === "repo") root.toggleCollapsed(r.repo)
+        else root.showDetail(r)
       }
       onTextKey: function(t) {
         if (t === "r") { root.refresh(); if (root.view === "detail") root.loadDetail() }
@@ -905,8 +951,7 @@ Panel {
             required property int index
 
             readonly property bool isHeading: modelData.kind === "repo"
-            readonly property bool active: !isHeading
-              && (root.cursor === row.index || rowMouse.containsMouse)
+            readonly property bool active: root.cursor === row.index || rowMouse.containsMouse
             readonly property bool isStale: !isHeading && root.stale(modelData)
 
             width: list.width - (list.interactive ? Style.space(10) : 0)
@@ -914,7 +959,9 @@ Panel {
               ? headingLabel.implicitHeight + Style.space(row.index === 0 ? 4 : 10)
               : prContent.implicitHeight + Style.space(10)
 
-            // Repository heading: owner/name, and how many PRs sit under it.
+            // Repository heading: a fold arrow, owner/name, and how many PRs
+            // sit under it; folded, also how many of them are failing, since
+            // their rows are not there to say so. Click or Enter folds it.
             Text {
               id: headingLabel
               visible: row.isHeading
@@ -922,7 +969,10 @@ Panel {
               anchors.right: parent.right
               anchors.bottom: parent.bottom
               anchors.leftMargin: Style.space(6)
-              text: row.isHeading ? row.modelData.repo + "  ·  " + row.modelData.count : ""
+              text: row.isHeading
+                ? (row.modelData.collapsed ? "\u25B8  " : "\u25BE  ") + row.modelData.repo + "  ·  " + row.modelData.count
+                  + (row.modelData.collapsed && row.modelData.failing > 0 ? "  ·  " + row.modelData.failing + " failing" : "")
+                : ""
               textFormat: Text.PlainText
               elide: Text.ElideRight
               font.family: root.fontFamily
@@ -932,7 +982,6 @@ Panel {
             }
 
             Rectangle {
-              visible: !row.isHeading
               anchors.fill: parent
               radius: Style.cornerRadius
               color: row.active
@@ -944,7 +993,6 @@ Panel {
 
             MouseArea {
               id: rowMouse
-              enabled: !row.isHeading
               anchors.fill: parent
               hoverEnabled: true
               cursorShape: Qt.PointingHandCursor
@@ -953,7 +1001,8 @@ Panel {
               // Middle click goes straight to the browser, the way it would
               // on a link.
               onClicked: function(mouse) {
-                if (mouse.button === Qt.MiddleButton) root.openPr(row.modelData)
+                if (row.isHeading) { if (mouse.button === Qt.LeftButton) root.toggleCollapsed(row.modelData.repo) }
+                else if (mouse.button === Qt.MiddleButton) root.openPr(row.modelData)
                 else root.showDetail(row.modelData)
               }
             }

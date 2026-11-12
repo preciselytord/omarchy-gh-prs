@@ -78,6 +78,34 @@ A merge always passes `--match-head-commit` with the head commit the detail
 view showed, so a commit pushed after you looked is never merged unseen:
 GitHub refuses the merge instead. It never passes `--admin`.
 
+### Auto-merge
+
+The **Auto-merge** checkbox in the detail view (or `a`) marks a PR to be
+merged as soon as it can be, with the same merge method the Merge button would
+use. It works where GitHub's own auto-merge is switched off, and it handles
+repositories that require branches to be up to date:
+
+- When GitHub says the branch is **behind** its base, it is rebased onto it
+  (GitHub's *update branch* with rebase, pinned to the head it expects), and
+  the checks are waited on again. This repeats as often as the base moves.
+- While checks are **running**, or a review is still required, it waits.
+- Once GitHub would take the merge, it merges with `--match-head-commit`.
+- It stops, and turns itself off, on failing checks, conflicts, requested
+  changes, a draft, a block that lasts more than 15 minutes, or **any commit
+  it did not make itself**: ticking the box pins the PR to the head you were
+  looking at, and each rebase moves that pin to the commit it produced.
+
+You get a desktop notification (`notify-send`) when a PR is merged, and when
+auto-merge stops, saying why. Each armed row shows where it has got to.
+
+Only the oldest armed PR in each repository is worked on at a time; the rest
+show *queued behind #n*. Merging one puts the others behind, and rebasing them
+all at once would only run their checks for nothing.
+
+It moves on each refresh (every 60 seconds by default), so it advances while
+the shell is running and the machine is awake, and picks up where it left off
+after a restart. Armed PRs are kept in `~/.local/state/omarchy-gh-prs/automerge.json`.
+
 ## Keys
 
 | Key | List | Detail view |
@@ -166,10 +194,12 @@ the widget on the bar. Update it later with
 
 The widget runs `gh` as you, with whatever access your `gh` login has, and
 holds no token of its own. Listing, the detail view and *Open* only read.
-**Merge** and **Close PR** write: they run `gh pr merge` and `gh pr close` on
-the PR you picked, with your permissions, and with *delete branch* switched on
-Close also deletes the PR's branch. Each happens only after its *Confirm*
-button, and a merge is pinned to the head commit you were shown. It never
+**Merge**, **Close PR** and **Auto-merge** write: they run `gh pr merge`,
+`gh pr close`, and GitHub's update-branch mutation (rebase) on the PR you
+picked, with your permissions; with *delete branch* switched on, Close also
+deletes the PR's branch. Merge and Close happen only after their *Confirm*
+button; Auto-merge acts later, on its own, once its box is ticked. Every merge
+is pinned to a head commit you were shown or that auto-merge made. It never
 passes `--admin`, so branch protection applies to you as it does on GitHub.
 
 Outside its own folder it writes the sort order to

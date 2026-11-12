@@ -100,6 +100,9 @@ Panel {
   property string actionBusy: ""
   property var actionResult: null
   property bool copied: false
+  // Auto-merge as last set from this view, until the list catches up: the
+  // row the view was opened from still says what it said then.
+  property var autoMergeSet: null
 
   readonly property int badgeCount: {
     if (!payload || badgeMode === "none") return 0
@@ -155,6 +158,15 @@ Panel {
 
   function plain(s) {
     return String(s || "").replace(/[<>]/g, "")
+  }
+
+  // Auto-merge moves on every refresh: the script takes each armed PR one
+  // step (rebase, wait or merge) and the list is read after it, so it shows
+  // where they got to.
+  function tick() {
+    if (tickProc.running) { refresh(); return }
+    tickProc.command = [root.script, "automerge", "tick"]
+    tickProc.running = true
   }
 
   function refresh() {
@@ -287,6 +299,7 @@ Panel {
     if (!pr) return ""
     var s = "#" + pr.number
     if (pr.draft) s += "  ·  draft"
+    if (pr.autoMerge) s += "  ·  auto-merge: " + pr.autoMerge.status
     return s
   }
 
@@ -377,6 +390,7 @@ Panel {
     deleteBranch = false
     actionResult = null
     copied = false
+    autoMergeSet = null
     view = "detail"
     loadDetail()
   }
@@ -441,6 +455,47 @@ Panel {
   readonly property bool canMerge: !!detail && detail.open && detail.mergeBlock === ""
     && actionBusy === "" && /^[0-9a-f]{40}$/.test(detail.headSha || "")
   readonly property bool canClose: !!detail && detail.open && actionBusy === ""
+
+  readonly property bool autoMergeOn: autoMergeSet !== null
+    ? autoMergeSet
+    : !!(selected && selected.autoMerge)
+  readonly property bool canAutoMerge: !!detail && detail.open && !detail.draft
+    && detail.mergeMethod !== "" && actionBusy === "" && !amProc.running
+    && /^[0-9a-f]{40}$/.test(detail.headSha || "")
+
+  // Turning it on pins it to the head commit on screen, as Merge does; the
+  // script stops if anyone else pushes after that.
+  function toggleAutoMerge() {
+    if (amProc.running || !selected || !validRepo(selected.repoFull)) return
+    actionResult = null
+    if (autoMergeOn) {
+      amProc.want = false
+      amProc.command = [root.script, "automerge", "disarm", selected.repoFull, String(selected.number)]
+    } else {
+      if (!canAutoMerge) return
+      var d = detail
+      amProc.want = true
+      amProc.command = [root.script, "automerge", "arm", d.repoFull, String(d.number), d.mergeMethod, d.headSha]
+    }
+    amProc.running = true
+  }
+
+  function applyAutoMerge(text, want) {
+    try {
+      var data = JSON.parse(text)
+      if (data.ok) autoMergeSet = want
+      else actionResult = { ok: false, text: data.error }
+    } catch (e) {
+      actionResult = { ok: false, text: "unexpected output from gh-prs" }
+    }
+    tick()
+  }
+
+  function autoMergeStatus() {
+    if (!autoMergeOn) return ""
+    if (autoMergeSet === true || !selected || !selected.autoMerge) return "on; it moves on the next refresh"
+    return selected.autoMerge.status
+  }
 
   function methodName(m) {
     if (m === "merge") return "merge commit"
@@ -536,6 +591,21 @@ Panel {
   }
 
   Process {
+    id: tickProc
+    stdout: StdioCollector {
+      onStreamFinished: root.refresh()
+    }
+  }
+
+  Process {
+    id: amProc
+    property bool want: false
+    stdout: StdioCollector {
+      onStreamFinished: root.applyAutoMerge(text, amProc.want)
+    }
+  }
+
+  Process {
     id: listProc
     stdout: StdioCollector {
       onStreamFinished: root.applyPayload(text)
@@ -580,7 +650,7 @@ Panel {
     running: true
     repeat: true
     triggeredOnStart: true
-    onTriggered: root.refresh()
+    onTriggered: root.tick()
   }
 
 
@@ -687,6 +757,7 @@ Panel {
         // These only arm the action and show what it will do; the confirm
         // itself is a click, so no run of keystrokes can merge or close.
         else if (t === "m" && root.view === "detail") root.armMerge()
+        else if (t === "a" && root.view === "detail") root.toggleAutoMerge()
         else if (t === "s" && root.view === "list") root.setSort(root.sortMode === "status" ? "date" : "status")
       }
 
@@ -1226,6 +1297,34 @@ Panel {
                 fontFamily: root.fontFamily
                 onClicked: root.armClose()
               }
+            }
+
+            // Auto-merge: on, it merges once checks pass, rebasing onto the
+            // base whenever the repository says the branch is behind.
+            Toggle {
+              width: parent.width
+              visible: !!root.detail && (root.detail.open || root.autoMergeOn)
+              enabled: root.autoMergeOn || root.canAutoMerge
+              opacity: enabled ? 1 : 0.4
+              label: "Auto-merge"
+                + (root.detail && root.detail.mergeMethod ? " (" + root.methodName(root.detail.mergeMethod) + ")" : "")
+                + " when checks pass, rebasing when behind"
+              checked: root.autoMergeOn
+              titleSize: Style.font.caption
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              onClicked: root.toggleAutoMerge()
+            }
+
+            Text {
+              width: parent.width
+              visible: root.autoMergeOn
+              text: "Auto-merge: " + root.autoMergeStatus()
+              textFormat: Text.PlainText
+              wrapMode: Text.Wrap
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              color: root.running
             }
 
             // Why Merge is off, in the panel's words and then GitHub's.

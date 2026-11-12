@@ -10,6 +10,11 @@
 #                                   close it, and delete its branch if asked
 #   copy <url>                      put a PR's URL on the clipboard
 #   sort [status|date]              print, or save, the panel's sort order
+#   automerge arm <owner/repo> <n> <method> <sha>
+#                                   merge it once its checks pass, rebasing it
+#                                   when it falls behind; pinned to <sha>
+#   automerge disarm <owner/repo> <n>
+#   automerge tick                  move every armed PR one step on
 #   demo on|off                     invented PRs instead of yours, for screenshots
 #
 # The list is one GraphQL search, paged, per refresh. Check states come from
@@ -45,10 +50,15 @@ readonly CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/omarchy-gh-prs"
 readonly DEMO_FILE="$CACHE_DIR/demo"
 readonly STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-gh-prs"
 readonly SORT_FILE="$STATE_DIR/sort"
+readonly AM_LIVE_FILE="$STATE_DIR/automerge.json"
+readonly AM_DEMO_FILE="$CACHE_DIR/automerge-demo.json"
+readonly AM_LOCK="$STATE_DIR/automerge.lock"
+readonly AM_TICK_LOCK="$STATE_DIR/automerge-tick.lock"
 readonly DEFAULT_QUERY="is:pr is:open author:@me archived:false"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly SCRIPT_DIR
 readonly DEMO_DATA="$SCRIPT_DIR/../assets/demo.json"
+readonly SELF="$SCRIPT_DIR/gh-prs"
 
 json_string() {
   printf '%s' "${1-}" | jq -Rs .
@@ -103,7 +113,7 @@ query($owner: String!, $name: String!, $number: Int!) {
   repository(owner: $owner, name: $name) {
     squashMergeAllowed mergeCommitAllowed rebaseMergeAllowed
     pullRequest(number: $number) {
-      number title url state isDraft reviewDecision createdAt updatedAt
+      id number title url state isDraft reviewDecision createdAt updatedAt
       headRefName baseRefName headRefOid mergeable mergeStateStatus
       author { login }
       repository { name nameWithOwner owner { login } }
@@ -199,7 +209,9 @@ readonly CHECKS='
 
 # shellcheck disable=SC2016
 readonly LIST_TRANSFORM="$CHECKS"'
-  [.[].data.search.nodes[] | select(.number != null) | summary] as $prs
+  [.[].data.search.nodes[] | select(.number != null) | summary
+   | . + {autoMerge: ($am[.repoFull + "#" + (.number | tostring)] // null
+                      | if . == null then null else {status: (.status // "armed")} end)}] as $prs
   | def count(f): [$prs[] | select(f)] | length;
   {
     ok: true,
@@ -272,6 +284,7 @@ readonly DETAIL_TRANSFORM="$CHECKS"'
       pr: ($s + {
         open: ($p.state == "OPEN"),
         prState: $p.state,
+        nodeId: $p.id,
         headSha: $p.headRefOid,
         mergeable: ($p.mergeable // "UNKNOWN"),
         mergeState: $ms,
@@ -348,7 +361,7 @@ list() {
   [[ -n "${query// }" ]] || query="$DEFAULT_QUERY"
 
   if demo_on; then
-    demo_data | jq "$LIST_TRANSFORM"
+    demo_data | jq --argjson am "$(am_state)" "$LIST_TRANSFORM"
     return
   fi
 
@@ -358,7 +371,7 @@ list() {
     || { printf '%s\n' "$out"; exit 0; }
   gql_error="$(graphql_error <<<"$out")"
   [[ -z "$gql_error" ]] || die "GitHub: $gql_error"
-  jq "$LIST_TRANSFORM" <<<"$out" 2>/dev/null || die "unexpected response from GitHub"
+  jq --argjson am "$(am_state)" "$LIST_TRANSFORM" <<<"$out" 2>/dev/null || die "unexpected response from GitHub"
 }
 
 detail() {
@@ -448,6 +461,268 @@ sort_order() {
   esac
 }
 
+# ------------------------------------------------------------- auto-merge
+#
+# GitHub's own auto-merge is off in many organisations, and it never rebases.
+# This is the same idea run from here: an armed PR is merged once its checks
+# pass, and when the base moves on and the repository requires branches to be
+# up to date, it is rebased (by GitHub, updatePullRequestBranch with REBASE)
+# and waited on again, as many times as that takes.
+#
+# It moves only when `tick` runs, which the panel does on every refresh, so
+# nothing happens while the shell is down or the machine asleep.
+#
+# Only the oldest armed PR in each repository is worked on. Merging one puts
+# every other PR in a strict repository behind, so rebasing them all at once
+# would only run their checks for nothing.
+#
+# Arming pins the PR to the head commit the detail view showed, and every
+# rebase done here moves the pin to the commit it produced. A head that is
+# anything else means someone pushed, and auto-merge stops rather than merge
+# commits nobody looked at. So does anything a wait would not fix: failing
+# checks, conflicts, requested changes, a draft. Each stop, and each merge,
+# is a desktop notification.
+
+am_file() { if demo_on; then echo "$AM_DEMO_FILE"; else echo "$AM_LIVE_FILE"; fi; }
+
+am_state() {
+  local f
+  f="$(am_file)"
+  if [[ -s "$f" ]] && jq -e 'type == "object"' "$f" >/dev/null 2>&1; then cat "$f"; else echo '{}'; fi
+}
+
+# Applies a jq program to the state, under a short lock so a tick and a click
+# in the panel never write over each other.
+am_update() {
+  local program="$1"; shift
+  local f
+  f="$(am_file)"
+  mkdir -p "$STATE_DIR" "$(dirname "$f")"
+  (
+    flock -w 10 9 || exit 1
+    am_state | jq "$@" "$program" >"$f.tmp" && mv "$f.tmp" "$f"
+  ) 9>"$AM_LOCK"
+}
+
+am_has() {
+  am_state | jq -e --arg k "$1" 'has($k)' >/dev/null
+}
+
+am_set() {
+  local key="$1" patch="$2"
+  am_update 'if has($k) then .[$k] += $p else . end' --arg k "$key" --argjson p "$patch"
+}
+
+am_remove() {
+  am_update 'del(.[$k])' --arg k "$1"
+}
+
+# Names and titles come from GitHub, and some notification daemons read the
+# body as markup, so it goes out as plain text.
+notify() {
+  command -v notify-send >/dev/null || return 0
+  local body
+  body="$(printf '%s' "${2-}" | tr -d '<>&')"
+  notify-send -a "GitHub PRs" -i github "$1" "$body" 2>/dev/null || true
+}
+
+automerge_arm() {
+  local repo="${1-}" number="${2-}" method="${3-}" sha="${4-}"
+  valid_repo "$repo" || die "not a repository: $repo"
+  valid_number "$number" || die "not a PR number: $number"
+  valid_method "$method" || die "not a merge method: $method"
+  valid_sha "$sha" || die "not a commit SHA: $sha"
+  local now
+  now="$(date +%s)"
+  am_update '.[$k] = {repo: $repo, number: ($n | tonumber), method: $method, sha: $sha,
+                     armedAt: $now, changedAt: $now, status: "armed"}' \
+    --arg k "$repo#$number" --arg repo "$repo" --arg n "$number" --arg method "$method" \
+    --arg sha "$sha" --argjson now "$now" || die "could not save the auto-merge state"
+  ok "auto-merge on for $repo#$number"
+}
+
+automerge_disarm() {
+  local repo="${1-}" number="${2-}"
+  valid_repo "$repo" || die "not a repository: $repo"
+  valid_number "$number" || die "not a PR number: $number"
+  am_remove "$repo#$number" || die "could not save the auto-merge state"
+  ok "auto-merge off for $repo#$number"
+}
+
+# What to do with one armed PR, from its detail record: done, disarm, rebase,
+# merge or wait, and why. Rebasing comes before waiting on checks: checks on a
+# branch that is behind are checks that will have to run again anyway.
+# A PR blocked with nothing failing is given fifteen minutes after its head
+# last changed, which is how long required checks may take to show up at all.
+# shellcheck disable=SC2016
+readonly AM_DECIDE='
+  .pr as $p
+  | if ($p.open | not) then ["done", (if $p.prState == "MERGED" then "merged" else "closed" end)]
+    elif $p.headSha != $sha then ["disarm", "new commits since auto-merge was turned on"]
+    elif $p.draft then ["disarm", "it is a draft"]
+    elif $p.mergeable == "CONFLICTING" or $p.mergeState == "DIRTY" then ["disarm", "conflicts with \($p.base)"]
+    elif $p.checks.failing > 0 then ["disarm", "checks failing"]
+    elif $p.review == "changes requested" then ["disarm", "changes requested"]
+    elif $p.mergeState == "BEHIND" then ["rebase", "behind \($p.base)"]
+    elif $p.checks.running > 0 then ["wait", "waiting for checks (\($p.checks.label))"]
+    elif $p.mergeBlock == "" then ["merge", ""]
+    elif $p.review == "review required" then ["wait", "waiting for review"]
+    elif $p.mergeState == "UNKNOWN" or $p.mergeable == "UNKNOWN" then ["wait", "GitHub is still checking"]
+    elif $p.mergeState == "BLOCKED" and ($now - $changed) < 900 then ["wait", "waiting for required checks"]
+    else ["disarm", $p.mergeBlock]
+    end
+  | @tsv
+'
+
+read -r -d '' REBASE_MUTATION <<'GRAPHQL' || true
+mutation($id: ID!, $sha: GitObjectID!) {
+  updatePullRequestBranch(input: {pullRequestId: $id, expectedHeadOid: $sha, updateMethod: REBASE}) {
+    pullRequest { headRefOid }
+  }
+}
+GRAPHQL
+
+# Rebases the PR onto its base and prints the new head. GitHub refuses if the
+# head is no longer <sha>. The new head is usually in the reply; when it is
+# not yet, it is read back for a few seconds.
+am_rebase() {
+  local repo="$1" number="$2" node="$3" sha="$4" out new attempt
+  out="$(gh_run api graphql -f query="$REBASE_MUTATION" -f id="$node" -f sha="$sha")" \
+    || { jq -r .error <<<"$out"; return 1; }
+  local gql_error
+  gql_error="$(graphql_error <<<"$out")"
+  [[ -z "$gql_error" ]] || { echo "GitHub: $gql_error"; return 1; }
+  new="$(jq -r '.data.updatePullRequestBranch.pullRequest.headRefOid // empty' <<<"$out")"
+  for attempt in 1 2 3 4 5; do
+    [[ -n "$new" && "$new" != "$sha" ]] && break
+    sleep 2
+    new="$(gh api "repos/$repo/pulls/$number" --jq .head.sha 2>/dev/null || true)"
+  done
+  valid_sha "$new" || { echo "could not read the head after rebasing"; return 1; }
+  printf '%s\n' "$new"
+}
+
+am_step() {
+  local key="$1" entry repo number method sha changed pending d now
+  entry="$(am_state | jq -c --arg k "$key" '.[$k] // empty')"
+  [[ -n "$entry" ]] || return 0
+  repo="$(jq -r .repo <<<"$entry")"
+  number="$(jq -r .number <<<"$entry")"
+  method="$(jq -r .method <<<"$entry")"
+  sha="$(jq -r .sha <<<"$entry")"
+  changed="$(jq -r '.changedAt // 0' <<<"$entry")"
+  pending="$(jq -r '.rebasePending // false' <<<"$entry")"
+  valid_repo "$repo" && valid_number "$number" && valid_method "$method" && valid_sha "$sha" \
+    || { am_remove "$key"; return 0; }
+
+  d="$("$SELF" detail "$repo" "$number")"
+  if ! jq -e '.ok == true' <<<"$d" >/dev/null 2>&1; then
+    am_set "$key" "$(jq -nc --arg e "$(jq -r '.error // "no reply"' <<<"$d" 2>/dev/null)" '{status: ("could not check: " + $e)}')"
+    return 0
+  fi
+  now="$(date +%s)"
+
+  # A rebase this script asked for whose new head it never got to read.
+  local head
+  head="$(jq -r '.pr.headSha // empty' <<<"$d")"
+  if [[ "$pending" == "true" && "$head" != "$sha" ]] && valid_sha "$head"; then
+    sha="$head"
+    changed="$now"
+    am_set "$key" "$(jq -nc --arg s "$sha" --argjson t "$now" '{sha: $s, changedAt: $t, rebasePending: false}')"
+  fi
+
+  local decision action reason
+  decision="$(jq -r --arg sha "$sha" --argjson changed "$changed" --argjson now "$now" "$AM_DECIDE" <<<"$d")"
+  action="${decision%%$'\t'*}"
+  reason="${decision#*$'\t'}"
+  local title
+  title="$(jq -r '.pr.title // ""' <<<"$d")"
+
+  # The user may have turned it off while this tick was looking.
+  if [[ "$action" == "merge" || "$action" == "rebase" ]] && ! am_has "$key"; then return 0; fi
+
+  case "$action" in
+    done)
+      am_remove "$key"
+      [[ "$reason" == "merged" ]] && notify "Merged $key" "$title"
+      [[ "$reason" == "closed" ]] && notify "Auto-merge off: $key was closed" "$title"
+      ;;
+    disarm)
+      am_remove "$key"
+      notify "Auto-merge off for $key: $reason" "$title"
+      ;;
+    wait)
+      am_set "$key" "$(jq -nc --arg s "$reason" '{status: $s}')"
+      ;;
+    rebase)
+      if demo_on; then am_set "$key" '{"status":"demo: would rebase"}'; return 0; fi
+      local node new
+      node="$(jq -r '.pr.nodeId // empty' <<<"$d")"
+      am_set "$key" "$(jq -nc --arg s "rebasing onto $(jq -r .pr.base <<<"$d")" '{status: $s, rebasePending: true}')"
+      if new="$(am_rebase "$repo" "$number" "$node" "$sha")"; then
+        am_set "$key" "$(jq -nc --arg s "$new" --argjson t "$now" \
+          '{sha: $s, changedAt: $t, rebasePending: false, status: "rebased; waiting for checks"}')"
+      else
+        am_remove "$key"
+        notify "Auto-merge off for $key: rebase failed" "$new"
+      fi
+      ;;
+    merge)
+      if demo_on; then am_set "$key" '{"status":"demo: would merge"}'; return 0; fi
+      am_set "$key" '{"status":"merging"}'
+      local res
+      res="$("$SELF" merge "$repo" "$number" "$method" "$sha")"
+      am_remove "$key"
+      if jq -e '.ok == true' <<<"$res" >/dev/null 2>&1; then
+        notify "Merged $key" "$title"
+      else
+        notify "Auto-merge off for $key: merge failed" "$(jq -r '.error // ""' <<<"$res" 2>/dev/null)"
+      fi
+      ;;
+    *)
+      am_set "$key" '{"status":"unexpected decision"}'
+      ;;
+  esac
+}
+
+# One tick at a time: a refresh that comes round while the last tick is still
+# rebasing skips its turn.
+automerge_tick() {
+  mkdir -p "$STATE_DIR"
+  exec 8>"$AM_TICK_LOCK"
+  flock -n 8 || ok "a tick is already running"
+  [[ "$(am_state)" != "{}" ]] || ok "nothing armed"
+  command -v gh >/dev/null || die "gh is not installed"
+
+  local active key
+  mapfile -t active < <(am_state | jq -r '
+    to_entries | group_by(.value.repo | ascii_downcase)
+    | map(min_by(.value.armedAt)) | .[].key')
+  for key in "${active[@]}"; do
+    am_step "$key"
+  done
+  am_update '
+    (to_entries | group_by(.value.repo | ascii_downcase)
+     | map(min_by(.value.armedAt) | {key: (.value.repo | ascii_downcase), value: .value.number})
+     | from_entries) as $first
+    | with_entries(
+        ($first[.value.repo | ascii_downcase]) as $n
+        | if $n != null and $n != .value.number
+          then .value.status = "queued behind #\($n)" else . end)' || true
+  ok "ticked"
+}
+
+automerge() {
+  local sub="${1-}"
+  shift || true
+  case "$sub" in
+    arm) automerge_arm "$@" ;;
+    disarm) automerge_disarm "$@" ;;
+    tick) automerge_tick ;;
+    *) echo "usage: gh-prs automerge arm <owner/repo> <n> <method> <sha> | disarm <owner/repo> <n> | tick" >&2; exit 2 ;;
+  esac
+}
+
 demo() {
   mkdir -p "$CACHE_DIR"
   case "${1-}" in
@@ -460,6 +735,7 @@ demo() {
 usage() {
   echo "usage: gh-prs list [query] | detail <owner/repo> <n> | merge <owner/repo> <n> <method> <sha>" >&2
   echo "       gh-prs close <owner/repo> <n> [delete-branch] | copy <url> | sort [status|date] | demo on|off" >&2
+  echo "       gh-prs automerge arm <owner/repo> <n> <method> <sha> | automerge disarm <owner/repo> <n> | automerge tick" >&2
   exit 2
 }
 
@@ -472,6 +748,7 @@ case "$cmd" in
   close) close_pr "$@" ;;
   copy) copy "$@" ;;
   sort) sort_order "$@" ;;
+  automerge) automerge "$@" ;;
   demo) demo "$@" ;;
   *) usage ;;
 esac

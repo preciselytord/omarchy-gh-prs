@@ -15,7 +15,7 @@
   },
   "barWidget": {
     "displayName": "GitHub PRs",
-    "description": "Your open pull requests and their check status, grouped by owner",
+    "description": "Your open pull requests and their check status, grouped by repository",
     "category": "Developer Tools",
     "aliases": [
       "github",

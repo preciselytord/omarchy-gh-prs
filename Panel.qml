@@ -8,8 +8,8 @@ import qs.Ui
 // GitHub PRs: your open pull requests and whether their checks pass.
 //
 // The bar shows a count of PRs with failing checks (or failing and running,
-// by setting); the panel lists every open PR, grouped by the org or user that
-// owns the repository, newest activity first, with a dot for its checks, a
+// by setting); the panel lists every open PR, grouped by repository,
+// newest activity first, with a dot for its checks, a
 // word saying where they are, and how long since it last moved.
 //
 // Hovering a row shows a summary. Clicking it opens the detail view: every
@@ -200,12 +200,12 @@ Panel {
 
   // ------------------------------------------------------------- the list
 
-  // Owner headings and PR rows in one flat list, so one ListView scrolls the
+  // Repository headings and PR rows in one flat list, so one ListView scrolls the
   // lot and the cursor can step over the headings.
   // By status: passing first, then running, failing, and no checks, drafts
-  // after the rest within each, newest first within that. Owners with
+  // after the rest within each, newest first within that. Repositories with
   // anything passing come first, then by their newest PR. By date: newest
-  // first, PRs and owners alike. The script already sends both by date.
+  // first, PRs and repositories alike. The script already sends both by date.
   function sortGroups(groups) {
     if (sortMode === "date") return groups
     var rank = { passing: 0, running: 1, failing: 2, none: 3 }
@@ -218,7 +218,7 @@ Panel {
       })
       var anyPassing = g.prs.some(function(pr) { return pr.state === "passing" })
       var latest = g.prs.reduce(function(m, pr) { return pr.updatedAt > m ? pr.updatedAt : m }, "")
-      return { owner: g.owner, failing: g.failing, prs: prs, anyPassing: anyPassing, latest: latest }
+      return { repo: g.repo, failing: g.failing, prs: prs, anyPassing: anyPassing, latest: latest }
     })
     out.sort(function(a, b) {
       return ((b.anyPassing ? 1 : 0) - (a.anyPassing ? 1 : 0))
@@ -244,7 +244,7 @@ Panel {
     var out = []
     for (var i = 0; i < groups.length; i++) {
       var g = groups[i]
-      out.push({ kind: "owner", owner: g.owner, count: g.prs.length, failing: g.failing })
+      out.push({ kind: "repo", repo: g.repo, count: g.prs.length, failing: g.failing })
       for (var j = 0; j < g.prs.length; j++) {
         var pr = g.prs[j]
         pr.kind = "pr"
@@ -285,7 +285,7 @@ Panel {
 
   function subtitleFor(pr) {
     if (!pr) return ""
-    var s = pr.repo + " #" + pr.number
+    var s = "#" + pr.number
     if (pr.draft) s += "  ·  draft"
     return s
   }
@@ -791,25 +791,25 @@ Panel {
             required property var modelData
             required property int index
 
-            readonly property bool isOwner: modelData.kind === "owner"
-            readonly property bool active: !isOwner
+            readonly property bool isHeading: modelData.kind === "repo"
+            readonly property bool active: !isHeading
               && (root.cursor === row.index || rowMouse.containsMouse)
-            readonly property bool isStale: !isOwner && root.stale(modelData)
+            readonly property bool isStale: !isHeading && root.stale(modelData)
 
             width: list.width - (list.interactive ? Style.space(10) : 0)
-            height: isOwner
-              ? ownerLabel.implicitHeight + Style.space(row.index === 0 ? 4 : 10)
+            height: isHeading
+              ? headingLabel.implicitHeight + Style.space(row.index === 0 ? 4 : 10)
               : prContent.implicitHeight + Style.space(10)
 
-            // Owner heading: the org or user, and how many PRs sit under it.
+            // Repository heading: owner/name, and how many PRs sit under it.
             Text {
-              id: ownerLabel
-              visible: row.isOwner
+              id: headingLabel
+              visible: row.isHeading
               anchors.left: parent.left
               anchors.right: parent.right
               anchors.bottom: parent.bottom
               anchors.leftMargin: Style.space(6)
-              text: row.isOwner ? row.modelData.owner + "  ·  " + row.modelData.count : ""
+              text: row.isHeading ? row.modelData.repo + "  ·  " + row.modelData.count : ""
               textFormat: Text.PlainText
               elide: Text.ElideRight
               font.family: root.fontFamily
@@ -819,7 +819,7 @@ Panel {
             }
 
             Rectangle {
-              visible: !row.isOwner
+              visible: !row.isHeading
               anchors.fill: parent
               radius: Style.cornerRadius
               color: row.active
@@ -831,7 +831,7 @@ Panel {
 
             MouseArea {
               id: rowMouse
-              enabled: !row.isOwner
+              enabled: !row.isHeading
               anchors.fill: parent
               hoverEnabled: true
               cursorShape: Qt.PointingHandCursor
@@ -846,7 +846,7 @@ Panel {
             }
 
             PanelToolTip {
-              visible: rowMouse.containsMouse && !row.isOwner && root.view === "list"
+              visible: rowMouse.containsMouse && !row.isHeading && root.view === "list"
               text: root.summaryText(row.modelData)
               fontFamily: root.fontFamily
             }
@@ -856,7 +856,7 @@ Panel {
             // The hovered row comes back up so it can be read.
             Row {
               id: prContent
-              visible: !row.isOwner
+              visible: !row.isHeading
               opacity: row.active ? 1
                 : row.modelData.draft ? 0.5
                 : row.isStale ? 0.6 : 1
@@ -897,7 +897,7 @@ Panel {
                     anchors.right: status.left
                     anchors.rightMargin: Style.space(8)
                     anchors.verticalCenter: parent.verticalCenter
-                    text: row.isOwner ? "" : row.modelData.title
+                    text: row.isHeading ? "" : row.modelData.title
                     textFormat: Text.PlainText
                     elide: Text.ElideRight
                     font.family: root.fontFamily
@@ -909,7 +909,7 @@ Panel {
                     id: status
                     anchors.right: parent.right
                     anchors.verticalCenter: parent.verticalCenter
-                    text: row.isOwner ? "" : row.modelData.label
+                    text: row.isHeading ? "" : row.modelData.label
                     textFormat: Text.PlainText
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.caption
@@ -927,7 +927,7 @@ Panel {
                     anchors.left: parent.left
                     anchors.right: reviewText.left
                     anchors.rightMargin: Style.space(8)
-                    text: row.isOwner ? "" : root.subtitleFor(row.modelData)
+                    text: row.isHeading ? "" : root.subtitleFor(row.modelData)
                     textFormat: Text.PlainText
                     elide: Text.ElideRight
                     font.family: root.fontFamily
@@ -944,7 +944,7 @@ Panel {
 
                     Text {
                       visible: text !== ""
-                      text: row.isOwner ? "" : (row.modelData.review || "")
+                      text: row.isHeading ? "" : (row.modelData.review || "")
                       textFormat: Text.PlainText
                       font.family: root.fontFamily
                       font.pixelSize: Style.font.caption
@@ -952,7 +952,7 @@ Panel {
                     }
 
                     Text {
-                      text: row.isOwner ? "" : root.ageLabel(row.modelData)
+                      text: row.isHeading ? "" : root.ageLabel(row.modelData)
                       textFormat: Text.PlainText
                       font.family: root.fontFamily
                       font.pixelSize: Style.font.caption

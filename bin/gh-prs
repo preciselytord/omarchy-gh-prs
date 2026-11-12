@@ -1,7 +1,7 @@
 #!/bin/bash
 # gh-prs — your open GitHub pull requests and their checks, as JSON.
 #
-#   list [query]                    every open PR the search finds, by owner
+#   list [query]                    every open PR the search finds, by repository
 #   detail <owner/repo> <n>         one PR in full: checks by name, reviewers,
 #                                   mergeability and the merge method to use
 #   merge <owner/repo> <n> <method> <sha>
@@ -218,9 +218,9 @@ readonly LIST_TRANSFORM="$CHECKS"'
       runningDrafts: count(.state == "running" and .draft)
     },
     groups: ($prs
-      | group_by(.owner | ascii_downcase)
+      | group_by(.repoFull | ascii_downcase)
       | map({
-          owner: .[0].owner,
+          repo: .[0].repoFull,
           failing: ([.[] | select(.state == "failing")] | length),
           prs: (sort_by(.updatedAt) | reverse)
         })

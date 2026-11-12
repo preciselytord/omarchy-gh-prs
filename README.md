@@ -4,7 +4,7 @@ A bar widget for the [Omarchy](https://omarchy.org) shell: every pull request
 you have open on GitHub, whether its checks pass, how long since it moved, and
 a detail view that can copy, merge or close it.
 
-![The panel open under the bar, listing open PRs grouped by owner with a coloured dot, a status and an age for each](preview.png)
+![The panel open under the bar, listing open PRs grouped by repository with a coloured dot, a status and an age for each](preview.png)
 
 ## What it shows
 
@@ -13,14 +13,14 @@ non-draft PRs have failing checks. The badge is red when something counted is
 failing, yellow when it is only counting checks still running, and gone when
 there is nothing to count. The tooltip spells out the totals.
 
-The panel lists every open PR, grouped by the org or user that owns the
-repository, in one of two orders, switched from the header:
+The panel lists every open PR, grouped by repository
+(`owner/name`), in one of two orders, switched from the header:
 
-- **By status** (the default): within each owner, passing PRs first, then
+- **By status** (the default): within each repository, passing PRs first, then
   running, failing, and those with no checks, drafts after the rest in each,
-  and newest first within that. Owners with anything passing come first, then
+  and newest first within that. Repositories with anything passing come first, then
   by their most recently updated PR.
-- **By date**: newest first, PRs and owners alike, whatever their checks say.
+- **By date**: newest first, PRs and repositories alike, whatever their checks say.
 
 The choice is saved in `~/.local/state/omarchy-gh-prs/sort`, so it survives a
 restart. Each row has:
@@ -30,7 +30,7 @@ restart. Each row has:
   - **yellow**: something is still queued, pending or in progress
   - **red**: something failed, was cancelled, timed out, or needs approval to run
   - **grey**: no checks at all
-- **The title**, elided to fit, with the repository and number under it.
+- **The title**, elided to fit, with its number under it.
 - **A status** on the right: `passing`, `running 3/12` (finished of total),
   `failing 2`, or `no checks`; and under it the review decision when there is
   one (`approved`, `changes requested`, `review required`) and how long since

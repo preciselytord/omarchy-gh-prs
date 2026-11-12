@@ -15,6 +15,9 @@
 #                                   when it falls behind; pinned to <sha>
 #   automerge disarm <owner/repo> <n>
 #   automerge tick                  move every armed PR one step on
+#   sessions <owner/repo> <n>       the Claude sessions linked from it, and
+#                                   their Herdr panes on this machine
+#   session <pane|url>              open one: its Herdr pane, or claude.ai
 #   demo on|off                     invented PRs instead of yours, for screenshots
 #
 # The list is one GraphQL search, paged, per refresh. Check states come from
@@ -519,10 +522,19 @@ am_remove() {
 
 # Names and titles come from GitHub, and some notification daemons read the
 # body as markup, so it goes out as plain text.
+# Given the PR's session (a Herdr pane or a claude.ai link), the notification
+# offers to open it; it waits for the click in the background, so the tick
+# does not.
 notify() {
   command -v notify-send >/dev/null || return 0
-  local body
+  local body pane="${3-}"
   body="$(printf '%s' "${2-}" | tr -d '<>&')"
+  if valid_pane "$pane" || valid_session_url "$pane"; then
+    setsid -f bash -c '
+      a="$(notify-send -a "GitHub PRs" -i github --action=open="Open session" -w "$1" "$2" 2>/dev/null)"
+      [[ "$a" == open ]] && "$3" session "$4" >/dev/null 2>&1' _ "$1" "$body" "$SELF" "$pane" >/dev/null 2>&1 </dev/null
+    return 0
+  fi
   notify-send -a "GitHub PRs" -i github "$1" "$body" 2>/dev/null || true
 }
 
@@ -669,7 +681,8 @@ am_step() {
       ;;
     disarm)
       am_remove "$key"
-      notify "Auto-merge off for $key: $reason" "$title"
+      notify "Auto-merge off for $key: $reason" "$title" \
+        "$(sessions_for "$repo" "$number" | jq -r '.[0] | .pane // .url // empty')"
       ;;
     wait)
       am_set "$key" "$(jq -nc --arg s "$reason" '{status: $s}')"
@@ -744,6 +757,98 @@ automerge() {
   esac
 }
 
+# --------------------------------------------------------- Claude sessions
+#
+# The Claude Code session behind a PR. Claude Code signs its PRs and commits
+# with a link to the session (claude.ai/code/session_...), so the PR says which
+# session made it. When that session runs in Herdr on this machine, it is
+# found by its transcript: the link to a session appears in its own transcript
+# more than in any other. Otherwise the link itself is what there is.
+
+valid_pane() { [[ "${1-}" =~ ^[A-Za-z0-9]{1,16}:[A-Za-z0-9]{1,16}$ ]]; }
+valid_session_url() { [[ "${1-}" =~ ^https://claude\.ai/code/session_[A-Za-z0-9]{8,64}$ ]]; }
+
+# The session links on a PR, newest last: its description, then its commits.
+session_links() {
+  local repo="$1" number="$2"
+  gh pr view "$number" -R "$repo" --json body,commits \
+    -q '[.body, (.commits[]? | .messageBody)] | join("\n")' 2>/dev/null \
+    | grep -oE 'https://claude\.ai/code/session_[A-Za-z0-9]{8,64}' | awk '!seen[$0]++' || true
+}
+
+# [{url, pane?, title?, status?}] for each session linked from the PR, the
+# most recently linked first.
+sessions_for() {
+  local repo="$1" number="$2" links agents
+  links="$(session_links "$repo" "$number" | tac)"
+  [[ -n "$links" ]] || { echo '[]'; return; }
+  agents='[]'
+  if command -v herdr >/dev/null; then
+    agents="$(herdr agent list 2>/dev/null | jq -c '
+      [.result.agents[]? | select(.agent == "claude" and .agent_session.value != null)
+       | {pane: .pane_id, id: .agent_session.value, title: (.terminal_title_stripped // ""), status: (.agent_status // "")}]' 2>/dev/null)" \
+      || agents='[]'
+    [[ -n "$agents" ]] || agents='[]'
+  fi
+  local out='[]' url a id transcript n best best_n
+  while IFS= read -r url; do
+    best='null'; best_n=0
+    while IFS= read -r a; do
+      [[ -n "$a" ]] || continue
+      id="$(jq -r .id <<<"$a")"
+      [[ "$id" =~ ^[0-9a-f-]{36}$ ]] || continue
+      transcript="$(ls -t "$HOME"/.claude/projects/*/"$id".jsonl 2>/dev/null | head -1)"
+      [[ -n "$transcript" ]] || continue
+      n="$(grep -cF "$url" "$transcript" || true)"
+      if (( n > best_n )); then best_n="$n"; best="$(jq -c 'del(.id)' <<<"$a")"; fi
+    done < <(jq -c '.[]' <<<"$agents")
+    out="$(jq -c --arg u "$url" --argjson b "$best" '. + [{url: $u} + ($b // {})]' <<<"$out")"
+  done <<<"$links"
+  printf '%s\n' "$out"
+}
+
+sessions() {
+  local repo="${1-}" number="${2-}"
+  valid_repo "$repo" || die "not a repository: $repo"
+  valid_number "$number" || die "not a PR number: $number"
+  demo_on && { jq -nc '{ok: true, error: "", sessions: []}'; return; }
+  command -v gh >/dev/null || die "gh is not installed"
+  jq -nc --argjson s "$(sessions_for "$repo" "$number")" '{ok: true, error: "", sessions: $s}'
+}
+
+# Opens a session: its Herdr pane when it has one, else its claude.ai page.
+open_session() {
+  local target="${1-}"
+  if valid_pane "$target"; then focus "$target"; fi
+  valid_session_url "$target" || die "not a session"
+  command -v xdg-open >/dev/null || die "xdg-open is not installed"
+  xdg-open "$target" >/dev/null 2>&1 &
+  ok "opened"
+}
+
+# Switches Herdr to the pane, then raises the terminal Herdr is drawn in:
+# the first window found walking up from a Herdr client process.
+focus() {
+  local pane="${1-}"
+  valid_pane "$pane" || die "not a Herdr pane: $pane"
+  command -v herdr >/dev/null || die "herdr is not installed"
+  herdr agent focus "$pane" >/dev/null 2>&1 || die "Herdr could not focus $pane"
+  if command -v hyprctl >/dev/null; then
+    local pid p
+    for pid in $(pgrep -x herdr); do
+      p="$pid"
+      while [[ -n "$p" && "$p" -gt 1 ]]; do
+        if hyprctl clients -j 2>/dev/null | jq -e --argjson p "$p" 'any(.[]; .pid == $p)' >/dev/null 2>&1; then
+          hyprctl dispatch focuswindow "pid:$p" >/dev/null 2>&1
+          ok "focused $pane"
+        fi
+        p="$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')"
+      done
+    done
+  fi
+  ok "focused $pane"
+}
+
 demo() {
   mkdir -p "$CACHE_DIR"
   case "${1-}" in
@@ -770,6 +875,8 @@ case "$cmd" in
   copy) copy "$@" ;;
   sort) sort_order "$@" ;;
   automerge) automerge "$@" ;;
+  sessions) sessions "$@" ;;
+  session) open_session "$@" ;;
   demo) demo "$@" ;;
   *) usage ;;
 esac

@@ -61,6 +61,11 @@ And the actions:
 
 - **Open** opens the PR in the browser.
 - **Copy link** puts its URL on the clipboard (`wl-copy`) and says *Copied*.
+- **Session** opens the Claude Code session that made the PR, found from the
+  `claude.ai/code/session_…` link Claude Code puts in PR descriptions and
+  commits. When that session runs in [Herdr](https://herdr.dev) on this
+  machine, Herdr switches to its pane and its terminal is raised; otherwise
+  the claude.ai page opens.
 - **Merge** merges it with `gh pr merge`, using squash when the repository
   allows it, then a merge commit, then rebase. The button is greyed out, with
   the reason under it, while the PR is a draft, conflicts with its base, has a
@@ -100,7 +105,9 @@ repositories that require branches to be up to date:
   looking at, and each rebase moves that pin to the commit it produced.
 
 You get a desktop notification (`notify-send`) when a PR is merged, and when
-auto-merge stops, saying why. Each armed row shows where it has got to.
+auto-merge stops, saying why. When it stops, the notification has an *Open
+session* action that opens the PR's Claude session, as the Session button
+does, so a conflict goes straight to whoever can fix it. Each armed row shows where it has got to.
 
 Only the oldest armed PR in each repository is worked on at a time; the rest
 show *queued behind #n*. Merging one puts the others behind, and rebasing them

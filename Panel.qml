@@ -100,6 +100,9 @@ Panel {
   property string actionBusy: ""
   property var actionResult: null
   property bool copied: false
+  // The Claude sessions linked from the PR shown: each a claude.ai link, with
+  // its Herdr pane when it runs here.
+  property var sessions: []
   // Auto-merge as last set from this view, until the list catches up: the
   // row the view was opened from still says what it said then.
   property var autoMergeSet: null
@@ -393,6 +396,42 @@ Panel {
     autoMergeSet = null
     view = "detail"
     loadDetail()
+    loadSessions()
+  }
+
+  function loadSessions() {
+    if (!selected) return
+    sessions = []
+    sessionsProc.running = false
+    sessionsProc.key = selected.repoFull + "#" + selected.number
+    sessionsProc.command = [root.script, "sessions", selected.repoFull, String(selected.number)]
+    sessionsProc.running = true
+  }
+
+  function applySessions(text, key) {
+    if (!selected || key !== selected.repoFull + "#" + selected.number) return
+    try {
+      var data = JSON.parse(text)
+      sessions = data.ok ? (data.sessions || []) : []
+    } catch (e) {
+      sessions = []
+    }
+  }
+
+  function validSession(s) {
+    return s && (/^[A-Za-z0-9]{1,16}:[A-Za-z0-9]{1,16}$/.test(String(s.pane || ""))
+      || /^https:\/\/claude\.ai\/code\/session_[A-Za-z0-9]{8,64}$/.test(String(s.url || "")))
+  }
+
+  function openSession(s) {
+    if (!validSession(s)) return
+    Util.execArgv([root.script, "session", s.pane || s.url])
+    close()
+  }
+
+  function sessionLabel(s) {
+    if (s.pane) return "Session: " + (s.title || s.pane)
+    return "Session on claude.ai"
   }
 
   function loadDetail() {
@@ -573,6 +612,7 @@ Panel {
       view = "list"
       selected = null
       detail = null
+      sessions = []
       confirm = ""
     }
   }
@@ -602,6 +642,14 @@ Panel {
     property bool want: false
     stdout: StdioCollector {
       onStreamFinished: root.applyAutoMerge(text, amProc.want)
+    }
+  }
+
+  Process {
+    id: sessionsProc
+    property string key: ""
+    stdout: StdioCollector {
+      onStreamFinished: root.applySessions(text, sessionsProc.key)
     }
   }
 
@@ -1261,6 +1309,24 @@ Panel {
                 fontFamily: root.fontFamily
                 tooltipText: "Open in the browser (o)"
                 onClicked: root.openPr(root.shown)
+              }
+
+              // The session that made the PR: its Herdr pane, or claude.ai.
+              Repeater {
+                model: root.sessions.filter(root.validSession).slice(0, 3)
+
+                Button {
+                  required property var modelData
+                  text: root.sessionLabel(modelData)
+                  bordered: true
+                  fontSize: Style.font.caption
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                  tooltipText: modelData.pane
+                    ? "Switch Herdr to this session (" + (modelData.status || "unknown") + ")"
+                    : "Open " + modelData.url
+                  onClicked: root.openSession(modelData)
+                }
               }
 
               Button {

@@ -39,6 +39,8 @@ Panel {
 
   // nf-oct-git_pull_request
   readonly property string iconPr: ""
+  // nf-oct-terminal: a PR whose Claude session is open in Herdr.
+  readonly property string iconHerdr: "\uf489"
   readonly property string iconDot: ""
 
   readonly property color foreground: bar ? bar.foreground : Color.foreground
@@ -1132,7 +1134,7 @@ Panel {
                   Text {
                     id: title
                     anchors.left: parent.left
-                    anchors.right: status.left
+                    anchors.right: herdrIcon.visible ? herdrIcon.left : status.left
                     anchors.rightMargin: Style.space(8)
                     anchors.verticalCenter: parent.verticalCenter
                     text: row.isHeading ? "" : row.modelData.title
@@ -1141,6 +1143,36 @@ Panel {
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.body
                     color: row.active ? root.foreground : Qt.darker(root.foreground, 1.15)
+                  }
+
+                  // The PR's Claude session is open in Herdr: click to go there.
+                  Text {
+                    id: herdrIcon
+                    visible: !row.isHeading && root.validSession(row.modelData.herdr)
+                    anchors.right: status.left
+                    anchors.rightMargin: Style.space(8)
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: root.iconHerdr
+                    textFormat: Text.PlainText
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                    color: herdrMouse.containsMouse ? root.foreground : root.quiet
+
+                    MouseArea {
+                      id: herdrMouse
+                      anchors.fill: parent
+                      anchors.margins: -Style.space(3)
+                      hoverEnabled: true
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: root.openSession(row.modelData.herdr)
+                    }
+
+                    PanelToolTip {
+                      visible: herdrMouse.containsMouse
+                      text: root.plain("Open in Herdr: " + ((row.modelData.herdr || {}).title || "session")
+                        + "  (" + ((row.modelData.herdr || {}).status || "unknown") + ")")
+                      fontFamily: root.fontFamily
+                    }
                   }
 
                   Text {

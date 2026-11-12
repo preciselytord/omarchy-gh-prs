@@ -92,7 +92,7 @@ query($q: String!, $endCursor: String) {
     pageInfo { hasNextPage endCursor }
     nodes {
       ... on PullRequest {
-        number title url isDraft reviewDecision createdAt updatedAt
+        number title url isDraft reviewDecision createdAt updatedAt body
         headRefName baseRefName
         author { login }
         repository { name nameWithOwner owner { login } }
@@ -215,7 +215,10 @@ readonly CHECKS='
 
 # shellcheck disable=SC2016
 readonly LIST_TRANSFORM="$CHECKS"'
-  [.[].data.search.nodes[] | select(.number != null) | summary
+  [.[].data.search.nodes[] | select(.number != null)
+   | ([(.body // "") | scan("https://claude\\.ai/code/session_[A-Za-z0-9]{8,64}")] | reverse) as $links
+   | summary
+   | . + {herdr: ([$links[] | $panes[.] // empty] | first // null)}
    | . + {autoMerge: ($am[.repoFull + "#" + (.number | tostring)] // null
                       | if . == null then null else {status: (.status // "armed")} end)}] as $prs
   | def count(f): [$prs[] | select(f)] | length;
@@ -366,7 +369,7 @@ list() {
   [[ -n "${query// }" ]] || query="$DEFAULT_QUERY"
 
   if demo_on; then
-    demo_data | jq --argjson am "$(am_state)" "$LIST_TRANSFORM"
+    demo_data | jq --argjson am "$(am_state)" --argjson panes '{}' "$LIST_TRANSFORM"
     return
   fi
 
@@ -376,7 +379,7 @@ list() {
     || { printf '%s\n' "$out"; exit 0; }
   gql_error="$(graphql_error <<<"$out")"
   [[ -z "$gql_error" ]] || die "GitHub: $gql_error"
-  jq --argjson am "$(am_state)" "$LIST_TRANSFORM" <<<"$out" 2>/dev/null || die "unexpected response from GitHub"
+  jq --argjson am "$(am_state)" --argjson panes "$(herdr_panes)" "$LIST_TRANSFORM" <<<"$out" 2>/dev/null || die "unexpected response from GitHub"
 }
 
 detail() {
@@ -806,6 +809,33 @@ sessions_for() {
     done < <(jq -c '.[]' <<<"$agents")
     out="$(jq -c --arg u "$url" --argjson b "$best" '. + [{url: $u} + ($b // {})]' <<<"$out")"
   done <<<"$links"
+  printf '%s\n' "$out"
+}
+
+# { "<session link>": {pane, title, status} } for every Claude session open in
+# Herdr here, keyed by the session's own link, so the list can mark each PR
+# whose description links one. A session's own link is the one its
+# transcript carries most often as a `Claude-Session:` trailer, which Claude
+# Code puts in every commit and PR it writes; links to other sessions turn up
+# in it too, but far fewer times.
+herdr_panes() {
+  command -v herdr >/dev/null || { echo '{}'; return; }
+  local agents a id transcript own out='{}'
+  agents="$(herdr agent list 2>/dev/null | jq -c '
+    [.result.agents[]? | select(.agent == "claude" and .agent_session.value != null)
+     | {pane: .pane_id, id: .agent_session.value, title: (.terminal_title_stripped // ""), status: (.agent_status // "")}]' 2>/dev/null)" \
+    || { echo '{}'; return; }
+  while IFS= read -r a; do
+    [[ -n "$a" ]] || continue
+    id="$(jq -r .id <<<"$a")"
+    [[ "$id" =~ ^[0-9a-f-]{36}$ ]] || continue
+    transcript="$(ls -t "$HOME"/.claude/projects/*/"$id".jsonl 2>/dev/null | head -1)"
+    [[ -n "$transcript" ]] || continue
+    own="$(grep -oE 'Claude-Session: https://claude\.ai/code/session_[A-Za-z0-9]{8,64}' "$transcript" 2>/dev/null \
+      | sort | uniq -c | sort -rn | awk 'NR == 1 { print $3 }')"
+    valid_session_url "$own" || continue
+    out="$(jq -c --arg u "$own" --argjson a "$a" '.[$u] = ($a | del(.id))' <<<"$out")"
+  done < <(jq -c '.[]?' <<<"${agents:-[]}")
   printf '%s\n' "$out"
 }
 

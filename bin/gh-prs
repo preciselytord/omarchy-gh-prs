@@ -826,20 +826,32 @@ open_session() {
   ok "opened"
 }
 
-# Switches Herdr to the pane, then raises the terminal Herdr is drawn in:
-# the first window found walking up from a Herdr client process.
+# Switches Herdr to the pane, then brings Herdr to the front. With Udder in
+# the bar that is Udder's own `udder-open`, which raises the terminal a Herdr
+# client is drawn in, or opens one when none is. Without it, the first window
+# found walking up from a Herdr client process is raised.
+readonly UDDER_OPEN="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/plugins/stappmus.udder/udder-open"
+
 focus() {
   local pane="${1-}"
   valid_pane "$pane" || die "not a Herdr pane: $pane"
   command -v herdr >/dev/null || die "herdr is not installed"
   herdr agent focus "$pane" >/dev/null 2>&1 || die "Herdr could not focus $pane"
+  if [[ -x "$UDDER_OPEN" ]]; then
+    "$UDDER_OPEN" >/dev/null 2>&1 || die "Udder could not bring Herdr to the front"
+    ok "focused $pane"
+  fi
   if command -v hyprctl >/dev/null; then
-    local pid p
+    local clients pid p address
+    clients="$(hyprctl clients -j 2>/dev/null || echo '[]')"
     for pid in $(pgrep -x herdr); do
       p="$pid"
       while [[ -n "$p" && "$p" -gt 1 ]]; do
-        if hyprctl clients -j 2>/dev/null | jq -e --argjson p "$p" 'any(.[]; .pid == $p)' >/dev/null 2>&1; then
-          hyprctl dispatch focuswindow "pid:$p" >/dev/null 2>&1
+        address="$(jq -r --argjson p "$p" 'first(.[] | select(.pid == $p) | .address) // empty' <<<"$clients" 2>/dev/null)"
+        if [[ "$address" =~ ^0x[0-9a-f]+$ ]]; then
+          # Hyprland 0.56 and later take Lua; older ones the plain dispatcher.
+          hyprctl dispatch "hl.dsp.focus({ window = \"address:$address\" })" 2>/dev/null | grep -qx ok \
+            || hyprctl dispatch focuswindow "address:$address" >/dev/null 2>&1 || true
           ok "focused $pane"
         fi
         p="$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')"

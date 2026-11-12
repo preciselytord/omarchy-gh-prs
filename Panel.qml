@@ -71,6 +71,9 @@ Panel {
   readonly property int intervalSeconds:
     Math.max(30, Number(setting("interval", 60)) || 60)
   readonly property string query: String(setting("query", ""))
+  // Saved Herdr machines, by label and comma-separated, whose Claude
+  // sessions count as well as this machine's.
+  readonly property string herdrMachines: String(setting("herdrMachines", ""))
   // "status" puts what is ready to merge on top; "date" is plain recency.
   // Chosen from the header and kept in the plugin's own state file rather
   // than in shell.json: other widgets save shell.json from their own copy of
@@ -182,14 +185,14 @@ Panel {
   // where they got to.
   function tick() {
     if (tickProc.running) { refresh(); return }
-    tickProc.command = [root.script, "automerge", "tick"]
+    tickProc.command = [root.script, "automerge", "tick", root.herdrMachines]
     tickProc.running = true
   }
 
   function refresh() {
     if (listProc.running) return
     loading = true
-    listProc.command = [root.script, "list", root.query]
+    listProc.command = [root.script, "list", root.query, root.herdrMachines]
     listProc.running = true
   }
 
@@ -485,7 +488,7 @@ Panel {
     sessions = []
     sessionsProc.running = false
     sessionsProc.key = selected.repoFull + "#" + selected.number
-    sessionsProc.command = [root.script, "sessions", selected.repoFull, String(selected.number)]
+    sessionsProc.command = [root.script, "sessions", selected.repoFull, String(selected.number), root.herdrMachines]
     sessionsProc.running = true
   }
 
@@ -500,18 +503,18 @@ Panel {
   }
 
   function validSession(s) {
-    return s && (/^[A-Za-z0-9]{1,16}:[A-Za-z0-9]{1,16}$/.test(String(s.pane || ""))
+    return s && (/^([0-9a-f]{32}\/)?[A-Za-z0-9]{1,16}:[A-Za-z0-9]{1,16}$/.test(String(s.target || ""))
       || /^https:\/\/claude\.ai\/code\/session_[A-Za-z0-9]{8,64}$/.test(String(s.url || "")))
   }
 
   function openSession(s) {
     if (!validSession(s)) return
-    Util.execArgv([root.script, "session", s.pane || s.url])
+    Util.execArgv([root.script, "session", s.target || s.url])
     close()
   }
 
   function sessionLabel(s) {
-    if (s.pane) return "Session: " + (s.title || s.pane)
+    if (s.target) return "Session: " + (s.title || s.pane) + (s.machine ? " (" + s.machine + ")" : "")
     return "Session on claude.ai"
   }
 
@@ -1169,8 +1172,11 @@ Panel {
 
                     PanelToolTip {
                       visible: herdrMouse.containsMouse
-                      text: root.plain("Open in Herdr: " + ((row.modelData.herdr || {}).title || "session")
-                        + "  (" + ((row.modelData.herdr || {}).status || "unknown") + ")")
+                      text: {
+                        var h = row.modelData.herdr || {}
+                        return root.plain("Open in Herdr: " + (h.title || "session")
+                          + (h.machine ? "  ·  on " + h.machine : "") + "  (" + (h.status || "unknown") + ")")
+                      }
                       fontFamily: root.fontFamily
                     }
                   }
@@ -1474,8 +1480,9 @@ Panel {
                   fontSize: Style.font.caption
                   foreground: root.foreground
                   fontFamily: root.fontFamily
-                  tooltipText: modelData.pane
-                    ? "Switch Herdr to this session (" + (modelData.status || "unknown") + ")"
+                  tooltipText: modelData.target
+                    ? "Switch Herdr to this session" + (modelData.machine ? " on " + modelData.machine : "")
+                      + " (" + (modelData.status || "unknown") + ")"
                     : "Open " + modelData.url
                   onClicked: root.openSession(modelData)
                 }

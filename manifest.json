@@ -29,7 +29,8 @@
       "badge": "failing",
       "badgeDrafts": false,
       "interval": 60,
-      "query": ""
+      "query": "",
+      "herdrMachines": ""
     },
     "schema": [
       {
@@ -56,6 +57,12 @@
         "key": "query",
         "type": "string",
         "label": "GitHub search (blank: is:pr is:open author:@me archived:false)",
+        "defaultValue": ""
+      },
+      {
+        "key": "herdrMachines",
+        "type": "string",
+        "label": "Herdr machines to find PR sessions on too, comma-separated saved labels (blank: this machine only)",
         "defaultValue": ""
       }
     ]

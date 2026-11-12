@@ -1,7 +1,9 @@
 #!/bin/bash
 # gh-prs — your open GitHub pull requests and their checks, as JSON.
 #
-#   list [query]                    every open PR the search finds, by repository
+#   list [query] [machines]         every open PR the search finds, by repository;
+#                                   machines: saved Herdr machine labels,
+#                                   comma-separated, whose sessions to look for
 #   detail <owner/repo> <n>         one PR in full: checks by name, reviewers,
 #                                   mergeability and the merge method to use
 #   merge <owner/repo> <n> <method> <sha>
@@ -16,10 +18,11 @@
 #                                   merge it once its checks pass, rebasing it
 #                                   when it falls behind; pinned to <sha>
 #   automerge disarm <owner/repo> <n>
-#   automerge tick                  move every armed PR one step on
-#   sessions <owner/repo> <n>       the Claude sessions linked from it, and
-#                                   their Herdr panes on this machine
-#   session <pane|url>              open one: its Herdr pane, or claude.ai
+#   automerge tick [machines]       move every armed PR one step on
+#   sessions <owner/repo> <n> [machines]
+#                                   the Claude sessions linked from it, and
+#                                   their Herdr panes
+#   session <target|url>            open one: its Herdr pane, or claude.ai
 #   demo on|off                     invented PRs instead of yours, for screenshots
 #
 # The list is one GraphQL search, paged, per refresh. Check states come from
@@ -60,6 +63,8 @@ readonly AM_LIVE_FILE="$STATE_DIR/automerge.json"
 readonly AM_DEMO_FILE="$CACHE_DIR/automerge-demo.json"
 readonly AM_LOCK="$STATE_DIR/automerge.lock"
 readonly AM_TICK_LOCK="$STATE_DIR/automerge-tick.lock"
+# The Herdr machines to look for a stopped PR's session on (see `list`).
+AM_MACHINES=""
 readonly DEFAULT_QUERY="is:pr is:open author:@me archived:false"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly SCRIPT_DIR
@@ -365,7 +370,7 @@ demo_data() {
 }
 
 list() {
-  local query="${1:-$DEFAULT_QUERY}"
+  local query="${1:-$DEFAULT_QUERY}" machines="${2-}"
   [[ -n "${query// }" ]] || query="$DEFAULT_QUERY"
 
   if demo_on; then
@@ -379,7 +384,7 @@ list() {
     || { printf '%s\n' "$out"; exit 0; }
   gql_error="$(graphql_error <<<"$out")"
   [[ -z "$gql_error" ]] || die "GitHub: $gql_error"
-  jq --argjson am "$(am_state)" --argjson panes "$(herdr_panes)" "$LIST_TRANSFORM" <<<"$out" 2>/dev/null || die "unexpected response from GitHub"
+  jq --argjson am "$(am_state)" --argjson panes "$(herdr_panes "$machines")" "$LIST_TRANSFORM" <<<"$out" 2>/dev/null || die "unexpected response from GitHub"
 }
 
 detail() {
@@ -534,7 +539,7 @@ notify() {
   command -v notify-send >/dev/null || return 0
   local body pane="${3-}"
   body="$(printf '%s' "${2-}" | tr -d '<>&')"
-  if valid_pane "$pane" || valid_session_url "$pane"; then
+  if valid_target "$pane" || valid_session_url "$pane"; then
     setsid -f bash -c '
       a="$(notify-send -a "GitHub PRs" -i github --action=open="Open session" -w "$1" "$2" 2>/dev/null)"
       [[ "$a" == open ]] && "$3" session "$4" >/dev/null 2>&1' _ "$1" "$body" "$SELF" "$pane" >/dev/null 2>&1 </dev/null
@@ -687,7 +692,7 @@ am_step() {
     disarm)
       am_remove "$key"
       notify "Auto-merge off for $key: $reason" "$title" \
-        "$(sessions_for "$repo" "$number" | jq -r '.[0] | .pane // .url // empty')"
+        "$(sessions_for "$repo" "$number" "$AM_MACHINES" | jq -r '.[0] | .target // .url // empty')"
       ;;
     wait)
       am_set "$key" "$(jq -nc --arg s "$reason" '{status: $s}')"
@@ -757,7 +762,7 @@ automerge() {
   case "$sub" in
     arm) automerge_arm "$@" ;;
     disarm) automerge_disarm "$@" ;;
-    tick) automerge_tick ;;
+    tick) AM_MACHINES="${1-}"; automerge_tick ;;
     *) echo "usage: gh-prs automerge arm <owner/repo> <n> <method> <sha> | disarm <owner/repo> <n> | tick" >&2; exit 2 ;;
   esac
 }
@@ -766,12 +771,123 @@ automerge() {
 #
 # The Claude Code session behind a PR. Claude Code signs its PRs and commits
 # with a link to the session (claude.ai/code/session_...), so the PR says which
-# session made it. When that session runs in Herdr on this machine, it is
-# found by its transcript: the link to a session appears in its own transcript
-# more than in any other. Otherwise the link itself is what there is.
+# session made it. The sessions open in Herdr, here and on the saved Herdr
+# machines named in the panel's settings, are each keyed by their own link;
+# a PR linking one of them can be opened in Herdr. Otherwise the link itself
+# is what there is.
+#
+# A session's own link is the one its transcript carries most often as a
+# `Claude-Session:` trailer, which Claude Code puts in every commit and PR it
+# writes; links to other sessions turn up in it too, but far fewer times.
+# Transcripts on another machine are read over ssh, once per session: the
+# answer is kept in the cache, and a session with no link yet is asked again
+# after ten minutes.
 
-valid_pane() { [[ "${1-}" =~ ^[A-Za-z0-9]{1,16}:[A-Za-z0-9]{1,16}$ ]]; }
+readonly LINK_CACHE="$CACHE_DIR/session-links.json"
+
+# A Herdr target: a pane here (w0:p2Q), or on a saved machine (<id>/w0:p2Q).
+valid_target() { [[ "${1-}" =~ ^([0-9a-f]{32}/)?[A-Za-z0-9]{1,16}:[A-Za-z0-9]{1,16}$ ]]; }
 valid_session_url() { [[ "${1-}" =~ ^https://claude\.ai/code/session_[A-Za-z0-9]{8,64}$ ]]; }
+
+# Prints "<session id> <own link>" for each Claude session id given whose
+# transcript is on this machine. Runs here, or on another machine by ssh.
+# shellcheck disable=SC2016
+readonly OWN_LINKS='
+for id in "$@"; do
+  f="$(ls -t "$HOME"/.claude/projects/*/"$id".jsonl 2>/dev/null | head -1)"
+  [ -n "$f" ] || continue
+  own="$(grep -oE "Claude-Session: https://claude\.ai/code/session_[A-Za-z0-9]{8,64}" "$f" 2>/dev/null \
+    | sort | uniq -c | sort -rn | awk "NR == 1 { print \$3 }")"
+  printf "%s %s\n" "$id" "$own"
+done
+'
+
+# The saved Herdr machines among the comma-separated labels, as
+# "<id>\t<ssh host>" lines. Unknown labels are skipped.
+herdr_machines() {
+  local wanted="${1-}" id label host rest
+  [[ -n "${wanted// }" ]] || return 0
+  command -v herdr >/dev/null || return 0
+  while IFS=$'\t' read -r id label host rest; do
+    [[ "$id" =~ ^[0-9a-f]{32}$ && "$host" =~ ^[A-Za-z0-9._-]{1,253}$ ]] || continue
+    local w
+    while IFS= read -r w; do
+      w="${w#"${w%%[![:space:]]*}"}"; w="${w%"${w##*[![:space:]]}"}"
+      [[ -n "$w" && "$w" == "$label" ]] && printf '%s\t%s\n' "$id" "$host"
+    done < <(tr ',' '\n' <<<"$wanted")
+  done < <(herdr machine list 2>/dev/null)
+}
+
+# The Claude agents in one Herdr server: here (machine "") or a saved one.
+herdr_agents() {
+  local machine="$1"
+  local -a cmd=(herdr)
+  [[ -n "$machine" ]] && cmd+=(--machine "$machine")
+  timeout 8 "${cmd[@]}" agent list 2>/dev/null | jq -c '
+    [.result.agents[]? | select(.agent == "claude" and .agent_session.value != null)
+     | {pane: .pane_id, id: .agent_session.value, title: (.terminal_title_stripped // ""), status: (.agent_status // "")}]' 2>/dev/null \
+    || echo '[]'
+}
+
+# Own links for the given session ids on one machine, through the cache.
+# Prints {"<id>": "<link>"} for those that have one.
+own_links() {
+  local machine="$1" host="$2"; shift 2
+  local now cache missing=() id
+  now="$(date +%s)"
+  mkdir -p "$CACHE_DIR"
+  cache="$( { [[ -s "$LINK_CACHE" ]] && jq -c 'if type == "object" then . else {} end' "$LINK_CACHE" 2>/dev/null; } || echo '{}')"
+  [[ -n "$cache" ]] || cache='{}'
+  for id in "$@"; do
+    jq -e --arg k "${machine:-local}/$id" --argjson now "$now" \
+      '.[$k] as $e | $e != null and ($e.link != "" or $now - $e.at < 600)' <<<"$cache" >/dev/null \
+      || missing+=("$id")
+  done
+  if (( ${#missing[@]} > 0 )); then
+    local found
+    if [[ -z "$machine" ]]; then
+      found="$(bash -c "$OWN_LINKS" _ "${missing[@]}" 2>/dev/null || true)"
+    else
+      found="$(timeout 10 ssh -o BatchMode=yes -o ConnectTimeout=5 "$host" bash -s -- "${missing[@]}" \
+        <<<"$OWN_LINKS" 2>/dev/null || true)"
+    fi
+    local line link
+    for id in "${missing[@]}"; do
+      line="$(grep -m1 "^$id " <<<"$found" || true)"
+      [[ -n "$line" ]] || continue
+      link="${line#* }"
+      valid_session_url "$link" || link=""
+      cache="$(jq -c --arg k "${machine:-local}/$id" --arg l "$link" --argjson now "$now" \
+        '.[$k] = {link: $l, at: $now}' <<<"$cache")"
+    done
+    printf '%s\n' "$cache" >"$LINK_CACHE.tmp" && mv "$LINK_CACHE.tmp" "$LINK_CACHE"
+  fi
+  jq -c --arg m "${machine:-local}" '
+    with_entries(select(.key | startswith($m + "/")) | select(.value.link != "")
+                 | {key: (.key | sub("^[^/]*/"; "")), value: .value.link})' <<<"$cache"
+}
+
+# { "<session link>": {target, pane, machine, title, status} } for every
+# Claude session open in Herdr here and on the named machines.
+herdr_panes() {
+  local machines="${1-}"
+  command -v herdr >/dev/null || { echo '{}'; return; }
+  local out='{}' machine host agents ids links
+  while IFS=$'\t' read -r machine host; do
+    agents="$(herdr_agents "$machine")"
+    mapfile -t ids < <(jq -r '.[].id | select(test("^[0-9a-f-]{36}$"))' <<<"$agents")
+    (( ${#ids[@]} > 0 )) || continue
+    links="$(own_links "$machine" "$host" "${ids[@]}")"
+    out="$(jq -c --argjson a "$agents" --argjson l "$links" --arg m "$machine" --arg h "$host" '
+      . + ([$a[] | select($l[.id] != null)
+            | {key: $l[.id],
+               value: {target: (if $m == "" then .pane else "\($m)/\(.pane)" end),
+                       pane, title, status,
+                       machine: (if $m == "" then "" else ($h | sub("\\..*"; "")) end)}}]
+           | from_entries)' <<<"$out")"
+  done < <(printf '\t\n'; herdr_machines "$machines")
+  printf '%s\n' "$out"
+}
 
 # The session links on a PR, newest last: its description, then its commits.
 session_links() {
@@ -781,97 +897,52 @@ session_links() {
     | grep -oE 'https://claude\.ai/code/session_[A-Za-z0-9]{8,64}' | awk '!seen[$0]++' || true
 }
 
-# [{url, pane?, title?, status?}] for each session linked from the PR, the
-# most recently linked first.
+# [{url, target?, pane?, machine?, title?, status?}] for each session linked
+# from the PR, the most recently linked first.
 sessions_for() {
-  local repo="$1" number="$2" links agents
+  local repo="$1" number="$2" machines="${3-}" links
   links="$(session_links "$repo" "$number" | tac)"
   [[ -n "$links" ]] || { echo '[]'; return; }
-  agents='[]'
-  if command -v herdr >/dev/null; then
-    agents="$(herdr agent list 2>/dev/null | jq -c '
-      [.result.agents[]? | select(.agent == "claude" and .agent_session.value != null)
-       | {pane: .pane_id, id: .agent_session.value, title: (.terminal_title_stripped // ""), status: (.agent_status // "")}]' 2>/dev/null)" \
-      || agents='[]'
-    [[ -n "$agents" ]] || agents='[]'
-  fi
-  local out='[]' url a id transcript n best best_n
-  while IFS= read -r url; do
-    best='null'; best_n=0
-    while IFS= read -r a; do
-      [[ -n "$a" ]] || continue
-      id="$(jq -r .id <<<"$a")"
-      [[ "$id" =~ ^[0-9a-f-]{36}$ ]] || continue
-      transcript="$(ls -t "$HOME"/.claude/projects/*/"$id".jsonl 2>/dev/null | head -1)"
-      [[ -n "$transcript" ]] || continue
-      n="$(grep -cF "$url" "$transcript" || true)"
-      if (( n > best_n )); then best_n="$n"; best="$(jq -c 'del(.id)' <<<"$a")"; fi
-    done < <(jq -c '.[]' <<<"$agents")
-    out="$(jq -c --arg u "$url" --argjson b "$best" '. + [{url: $u} + ($b // {})]' <<<"$out")"
-  done <<<"$links"
-  printf '%s\n' "$out"
-}
-
-# { "<session link>": {pane, title, status} } for every Claude session open in
-# Herdr here, keyed by the session's own link, so the list can mark each PR
-# whose description links one. A session's own link is the one its
-# transcript carries most often as a `Claude-Session:` trailer, which Claude
-# Code puts in every commit and PR it writes; links to other sessions turn up
-# in it too, but far fewer times.
-herdr_panes() {
-  command -v herdr >/dev/null || { echo '{}'; return; }
-  local agents a id transcript own out='{}'
-  agents="$(herdr agent list 2>/dev/null | jq -c '
-    [.result.agents[]? | select(.agent == "claude" and .agent_session.value != null)
-     | {pane: .pane_id, id: .agent_session.value, title: (.terminal_title_stripped // ""), status: (.agent_status // "")}]' 2>/dev/null)" \
-    || { echo '{}'; return; }
-  while IFS= read -r a; do
-    [[ -n "$a" ]] || continue
-    id="$(jq -r .id <<<"$a")"
-    [[ "$id" =~ ^[0-9a-f-]{36}$ ]] || continue
-    transcript="$(ls -t "$HOME"/.claude/projects/*/"$id".jsonl 2>/dev/null | head -1)"
-    [[ -n "$transcript" ]] || continue
-    own="$(grep -oE 'Claude-Session: https://claude\.ai/code/session_[A-Za-z0-9]{8,64}' "$transcript" 2>/dev/null \
-      | sort | uniq -c | sort -rn | awk 'NR == 1 { print $3 }')"
-    valid_session_url "$own" || continue
-    out="$(jq -c --arg u "$own" --argjson a "$a" '.[$u] = ($a | del(.id))' <<<"$out")"
-  done < <(jq -c '.[]?' <<<"${agents:-[]}")
-  printf '%s\n' "$out"
+  jq -Rnc --argjson p "$(herdr_panes "$machines")" '[inputs | select(. != "") | {url: .} + ($p[.] // {})]' <<<"$links"
 }
 
 sessions() {
-  local repo="${1-}" number="${2-}"
+  local repo="${1-}" number="${2-}" machines="${3-}"
   valid_repo "$repo" || die "not a repository: $repo"
   valid_number "$number" || die "not a PR number: $number"
   demo_on && { jq -nc '{ok: true, error: "", sessions: []}'; return; }
   command -v gh >/dev/null || die "gh is not installed"
-  jq -nc --argjson s "$(sessions_for "$repo" "$number")" '{ok: true, error: "", sessions: $s}'
+  jq -nc --argjson s "$(sessions_for "$repo" "$number" "$machines")" '{ok: true, error: "", sessions: $s}'
 }
 
 # Opens a session: its Herdr pane when it has one, else its claude.ai page.
 open_session() {
   local target="${1-}"
-  if valid_pane "$target"; then focus "$target"; fi
+  if valid_target "$target"; then focus "$target"; fi
   valid_session_url "$target" || die "not a session"
   command -v xdg-open >/dev/null || die "xdg-open is not installed"
   xdg-open "$target" >/dev/null 2>&1 &
   ok "opened"
 }
 
-# Switches Herdr to the pane, then brings Herdr to the front. With Udder in
-# the bar that is Udder's own `udder-open`, which raises the terminal a Herdr
-# client is drawn in, or opens one when none is. Without it, the first window
-# found walking up from a Herdr client process is raised.
+# Switches Herdr to the pane, on its machine, then brings Herdr to the front.
+# With Udder in the bar that is Udder's own `udder-open`, which raises the
+# terminal a Herdr client is drawn in, or opens one when none is. Without it,
+# the first window found walking up from a Herdr client process is raised.
 readonly UDDER_OPEN="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/plugins/stappmus.udder/udder-open"
 
 focus() {
-  local pane="${1-}"
-  valid_pane "$pane" || die "not a Herdr pane: $pane"
+  local target="${1-}" pane machine=""
+  valid_target "$target" || die "not a Herdr pane: $target"
   command -v herdr >/dev/null || die "herdr is not installed"
-  herdr agent focus "$pane" >/dev/null 2>&1 || die "Herdr could not focus $pane"
+  pane="${target#*/}"
+  [[ "$target" == */* ]] && machine="${target%%/*}"
+  local -a cmd=(herdr)
+  [[ -n "$machine" ]] && cmd+=(--machine "$machine")
+  "${cmd[@]}" agent focus "$pane" >/dev/null 2>&1 || die "Herdr could not focus $pane"
   if [[ -x "$UDDER_OPEN" ]]; then
     "$UDDER_OPEN" >/dev/null 2>&1 || die "Udder could not bring Herdr to the front"
-    ok "focused $pane"
+    ok "focused $target"
   fi
   if command -v hyprctl >/dev/null; then
     local clients pid p address
@@ -884,13 +955,13 @@ focus() {
           # Hyprland 0.56 and later take Lua; older ones the plain dispatcher.
           hyprctl dispatch "hl.dsp.focus({ window = \"address:$address\" })" 2>/dev/null | grep -qx ok \
             || hyprctl dispatch focuswindow "address:$address" >/dev/null 2>&1 || true
-          ok "focused $pane"
+          ok "focused $target"
         fi
         p="$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')"
       done
     done
   fi
-  ok "focused $pane"
+  ok "focused $target"
 }
 
 # The repositories collapsed in the panel, one per line, kept here for the
@@ -932,7 +1003,7 @@ usage() {
 cmd="${1-list}"
 shift || true
 case "$cmd" in
-  list) list "${1-}" ;;
+  list) list "${1-}" "${2-}" ;;
   detail) detail "$@" ;;
   merge) merge "$@" ;;
   close) close_pr "$@" ;;

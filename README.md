@@ -37,8 +37,9 @@ restart. Each row has:
   - **red**: something failed, was cancelled, timed out, or needs approval to run
   - **grey**: no checks at all
 - **The title**, elided to fit, with its number under it.
-- **A terminal icon** when the PR's Claude Code session is open in Herdr on
-  this machine; clicking it goes straight to that session (see *Session*
+- **A terminal icon** when the PR's Claude Code session is open in Herdr, on
+  this machine or on a saved Herdr machine listed in the `herdrMachines`
+  setting (comma-separated labels, e.g. `xps13, thinkpad`); clicking it goes straight to that session (see *Session*
   below).
 - **A status** on the right: `passing`, `running 3/12` (finished of total),
   `failing 2`, or `no checks`; and under it the review decision when there is

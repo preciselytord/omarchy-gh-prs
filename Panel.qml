@@ -247,9 +247,19 @@ Panel {
     Util.execArgv([root.script, "sort", mode])
   }
 
+  // A new model puts a ListView back at the top, so the scroll position is
+  // put back after it: a fold or a refresh never moves the list under you.
+  // Once now, and once more after the delegates are laid out, when the
+  // content height is known.
   function rebuildRows() {
+    var y = list.contentY
     rows = flatten(sortGroups(payload ? payload.groups || [] : []))
     if (cursor >= rows.length) cursor = -1
+    function restore() {
+      list.contentY = Math.max(0, Math.min(y, list.contentHeight - list.height))
+    }
+    restore()
+    Qt.callLater(restore)
   }
 
   function toggleCollapsed(repo) {
@@ -258,11 +268,11 @@ Panel {
     var on = !next[repo]
     if (on) next[repo] = true
     else delete next[repo]
+    // The cursor stays at the same spot, on whatever row is there now, and
+    // the list where it was (see rebuildRows): following the heading to the
+    // bottom would lose your place.
     collapsed = next
     rebuildRows()
-    // The heading moves (folded ones go last), so the cursor follows it.
-    for (var i = 0; i < rows.length; i++)
-      if (rows[i].kind === "repo" && rows[i].repo === repo) { cursor = i; list.positionViewAtIndex(i, ListView.Contain); break }
     Util.execArgv([root.script, "collapsed", repo, on ? "on" : "off"])
   }
 

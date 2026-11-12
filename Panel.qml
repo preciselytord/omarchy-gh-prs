@@ -757,7 +757,6 @@ Panel {
         // These only arm the action and show what it will do; the confirm
         // itself is a click, so no run of keystrokes can merge or close.
         else if (t === "m" && root.view === "detail") root.armMerge()
-        else if (t === "a" && root.view === "detail") root.toggleAutoMerge()
         else if (t === "s" && root.view === "list") root.setSort(root.sortMode === "status" ? "date" : "status")
       }
 

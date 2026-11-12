@@ -552,6 +552,9 @@ automerge_disarm() {
 # What to do with one armed PR, from its detail record: done, disarm, rebase,
 # merge or wait, and why. Rebasing comes before waiting on checks: checks on a
 # branch that is behind are checks that will have to run again anyway.
+# A review that was not required before a rebase done here, and is after it,
+# is a branch rule treating the rebased commits as new changes, which no
+# amount of waiting fixes.
 # A PR blocked with nothing failing is given fifteen minutes after its head
 # last changed, which is how long required checks may take to show up at all.
 # shellcheck disable=SC2016
@@ -566,6 +569,8 @@ readonly AM_DECIDE='
     elif $p.mergeState == "BEHIND" then ["rebase", "behind \($p.base)"]
     elif $p.checks.running > 0 then ["wait", "waiting for checks (\($p.checks.label))"]
     elif $p.mergeBlock == "" then ["merge", ""]
+    elif $p.review == "review required" and $reviewAtRebase != null and $reviewAtRebase != "review required"
+      then ["disarm", "a review is required again since the rebase (a branch rule counts the rebase as a new change)"]
     elif $p.review == "review required" then ["wait", "waiting for review"]
     elif $p.mergeState == "UNKNOWN" or $p.mergeable == "UNKNOWN" then ["wait", "GitHub is still checking"]
     elif $p.mergeState == "BLOCKED" and ($now - $changed) < 900 then ["wait", "waiting for required checks"]
@@ -602,6 +607,20 @@ am_rebase() {
   printf '%s\n' "$new"
 }
 
+# A rebase or merge that fails is tried again on the next tick: on a strict
+# repository the base can move between looking and merging, and GitHub can
+# still say BEHIND for a moment after a rebase. Three in a row, and it stops.
+am_failed() {
+  local key="$1" entry="$2" what="$3" why="$4" n
+  n=$(( $(jq -r '.failures // 0' <<<"$entry") + 1 ))
+  if (( n >= 3 )); then
+    am_remove "$key"
+    notify "Auto-merge off for $key: $what" "$why"
+  else
+    am_set "$key" "$(jq -nc --argjson n "$n" --arg s "$what ($n/3), will retry: $why" '{failures: $n, status: $s}')"
+  fi
+}
+
 am_step() {
   local key="$1" entry repo number method sha changed pending d now
   entry="$(am_state | jq -c --arg k "$key" '.[$k] // empty')"
@@ -632,7 +651,8 @@ am_step() {
   fi
 
   local decision action reason
-  decision="$(jq -r --arg sha "$sha" --argjson changed "$changed" --argjson now "$now" "$AM_DECIDE" <<<"$d")"
+  decision="$(jq -r --arg sha "$sha" --argjson changed "$changed" --argjson now "$now" \
+    --argjson reviewAtRebase "$(jq -c '.reviewAtRebase // null' <<<"$entry")" "$AM_DECIDE" <<<"$d")"
   action="${decision%%$'\t'*}"
   reason="${decision#*$'\t'}"
   local title
@@ -658,13 +678,14 @@ am_step() {
       if demo_on; then am_set "$key" '{"status":"demo: would rebase"}'; return 0; fi
       local node new
       node="$(jq -r '.pr.nodeId // empty' <<<"$d")"
-      am_set "$key" "$(jq -nc --arg s "rebasing onto $(jq -r .pr.base <<<"$d")" '{status: $s, rebasePending: true}')"
+      am_set "$key" "$(jq -nc --arg s "rebasing onto $(jq -r .pr.base <<<"$d")" \
+        --arg r "$(jq -r '.pr.review' <<<"$d")" '{status: $s, rebasePending: true, reviewAtRebase: $r}')"
       if new="$(am_rebase "$repo" "$number" "$node" "$sha")"; then
         am_set "$key" "$(jq -nc --arg s "$new" --argjson t "$now" \
-          '{sha: $s, changedAt: $t, rebasePending: false, status: "rebased; waiting for checks"}')"
+          '{sha: $s, changedAt: $t, rebasePending: false, failures: 0, status: "rebased; waiting for checks"}')"
       else
-        am_remove "$key"
-        notify "Auto-merge off for $key: rebase failed" "$new"
+        am_set "$key" '{"rebasePending": false}'
+        am_failed "$key" "$entry" "rebase failed" "$new"
       fi
       ;;
     merge)
@@ -672,11 +693,11 @@ am_step() {
       am_set "$key" '{"status":"merging"}'
       local res
       res="$("$SELF" merge "$repo" "$number" "$method" "$sha")"
-      am_remove "$key"
       if jq -e '.ok == true' <<<"$res" >/dev/null 2>&1; then
+        am_remove "$key"
         notify "Merged $key" "$title"
       else
-        notify "Auto-merge off for $key: merge failed" "$(jq -r '.error // ""' <<<"$res" 2>/dev/null)"
+        am_failed "$key" "$entry" "merge failed" "$(jq -r '.error // ""' <<<"$res" 2>/dev/null)"
       fi
       ;;
     *)

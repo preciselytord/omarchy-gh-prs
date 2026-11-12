@@ -80,7 +80,7 @@ GitHub refuses the merge instead. It never passes `--admin`.
 
 ### Auto-merge
 
-The **Auto-merge** checkbox in the detail view (or `a`) marks a PR to be
+The **Auto-merge** checkbox in the detail view marks a PR to be
 merged as soon as it can be, with the same merge method the Merge button would
 use. It works where GitHub's own auto-merge is switched off, and it handles
 repositories that require branches to be up to date:
@@ -90,8 +90,12 @@ repositories that require branches to be up to date:
   the checks are waited on again. This repeats as often as the base moves.
 - While checks are **running**, or a review is still required, it waits.
 - Once GitHub would take the merge, it merges with `--match-head-commit`.
+- A failed rebase or merge is tried again on the next refresh, up to three
+  times in a row.
 - It stops, and turns itself off, on failing checks, conflicts, requested
-  changes, a draft, a block that lasts more than 15 minutes, or **any commit
+  changes, a draft, a block that lasts more than 15 minutes, a review that
+  becomes required only after one of its rebases (a branch rule counting the
+  rebase as a new change), or **any commit
   it did not make itself**: ticking the box pins the PR to the head you were
   looking at, and each rebase moves that pin to the commit it produced.
 
